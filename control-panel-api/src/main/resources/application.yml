@@ -1,0 +1,57 @@
+spring:
+  application:
+    name: control-panel
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/cp}
+    username: ${DB_USER:cp}
+    password: ${DB_PASS:cp}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+  liquibase:
+    change-log: classpath:db/changelog/db.changelog-master.yaml
+  data:
+    redis:
+      url: ${REDIS_URL:redis://localhost:6379}
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+
+springdoc:
+  swagger-ui:
+    path: /swagger
+
+app:
+  auth:
+    session-secret: ${APP_AUTH_SESSION_SECRET:}
+    session-ttl: PT12H
+  signing:
+    # AES master key (base64) used to encrypt signing private keys at rest — required, no default
+    master-key: ${APP_KEY_ENC_MASTER:}
+    issuer: ${APP_ISSUER:https://control-panel.example.com}
+    default-audience: ${APP_DEFAULT_AUDIENCE:docker-app-prod}
+  licenses:
+    default-ttl-days: 365
+  sso:
+    enabled: ${APP_SSO_ENABLED:true}
+    base-url: ${APP_SSO_BASE_URL:http://localhost:8080}
+  ui:
+    base-url: ${APP_UI_BASE_URL:http://localhost:5173}
+  events:
+    listener:
+      enabled: ${APP_EVENTS_LISTENER_ENABLED:false}
+      poll-ms: 1000
+
+logging:
+  level:
+    org.springframework.security: INFO

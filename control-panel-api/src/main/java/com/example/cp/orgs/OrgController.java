@@ -1,0 +1,122 @@
+package com.example.cp.orgs;
+
+import com.example.cp.common.PagedResponse;
+import com.example.cp.common.SecurityUtils;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.UUID;
+
+@RestController
+@RequestMapping("/api/v1/orgs")
+public class OrgController {
+
+    private final OrgService orgService;
+
+    public OrgController(OrgService orgService) {
+        this.orgService = orgService;
+    }
+
+    @PostMapping
+    @PreAuthorize("hasAuthority('org.write')")
+    public ResponseEntity<OrgDto> create(@Valid @RequestBody CreateOrgRequest body) {
+        UUID actorId = SecurityUtils.currentUserId();
+        Organization saved = orgService.createOrg(body.slug(), body.name(), actorId);
+        return ResponseEntity.status(201).body(OrgDto.from(saved));
+    }
+
+    @GetMapping
+    public PagedResponse<OrgDto> listMine() {
+        UUID actorId = SecurityUtils.currentUserId();
+        List<OrgDto> items = orgService.listOrgsForUser(actorId).stream()
+                .map(OrgDto::from).toList();
+        return PagedResponse.of(items, items.size(), 0, items.size());
+    }
+
+    @GetMapping("/{orgId}")
+    @PreAuthorize("@orgAccess.isMember(#orgId)")
+    public OrgDto get(@PathVariable UUID orgId) {
+        return OrgDto.from(orgService.get(orgId));
+    }
+
+    @GetMapping("/{orgId}/members")
+    @PreAuthorize("@orgAccess.isMember(#orgId)")
+    public PagedResponse<OrgMemberDto> listMembers(@PathVariable UUID orgId) {
+        List<OrgMemberDto> items = orgService.listMembers(orgId).stream()
+                .map(OrgMemberDto::from).toList();
+        return PagedResponse.of(items, items.size(), 0, items.size());
+    }
+
+    @PostMapping("/{orgId}/members")
+    @PreAuthorize("@orgAccess.hasRole(#orgId, 'ADMIN')")
+    public ResponseEntity<OrgMemberDto> addMember(@PathVariable UUID orgId,
+                                                  @Valid @RequestBody AddMemberRequest body) {
+        OrgMember.Role role;
+        try {
+            role = OrgMember.Role.valueOf(body.role().toUpperCase());
+        } catch (IllegalArgumentException ex) {
+            throw com.example.cp.common.ApiException.badRequest("Invalid role; must be OWNER, ADMIN, MEMBER, or VIEWER");
+        }
+        OrgMember saved = orgService.addMember(orgId, body.email(), role);
+        return ResponseEntity.status(201).body(OrgMemberDto.from(saved));
+    }
+
+    @DeleteMapping("/{orgId}/members/{userId}")
+    @PreAuthorize("@orgAccess.hasRole(#orgId, 'ADMIN')")
+    public ResponseEntity<Void> removeMember(@PathVariable UUID orgId, @PathVariable UUID userId) {
+        orgService.removeMember(orgId, userId);
+        return ResponseEntity.noContent().build();
+    }
+
+    @PostMapping("/{orgId}/transfer-owner")
+    @PreAuthorize("@orgAccess.hasRole(#orgId, 'OWNER')")
+    public ResponseEntity<Void> transferOwner(@PathVariable UUID orgId,
+                                              @Valid @RequestBody TransferOwnerRequest body) {
+        orgService.transferOwner(orgId, body.newOwnerUserId());
+        return ResponseEntity.noContent().build();
+    }
+
+    public record CreateOrgRequest(
+            @NotBlank @Size(min = 3, max = 64)
+            @Pattern(regexp = "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$", message = "lowercase letters, digits and dashes only")
+            String slug,
+            @NotBlank @Size(max = 255) String name) {}
+
+    public record AddMemberRequest(
+            @NotBlank @Email String email,
+            @NotBlank String role) {}
+
+    public record TransferOwnerRequest(@NotNull UUID newOwnerUserId) {}
+
+    public record OrgDto(UUID id, String slug, String name, String status,
+                         OffsetDateTime createdAt, OffsetDateTime updatedAt) {
+        public static OrgDto from(Organization o) {
+            return new OrgDto(o.getId(), o.getSlug(), o.getName(),
+                    o.getStatus() == null ? null : o.getStatus().name(),
+                    o.getCreatedAt(), o.getUpdatedAt());
+        }
+    }
+
+    public record OrgMemberDto(UUID orgId, UUID userId, String role, OffsetDateTime addedAt) {
+        public static OrgMemberDto from(OrgMember m) {
+            return new OrgMemberDto(m.getOrgId(), m.getUserId(),
+                    m.getRole() == null ? null : m.getRole().name(),
+                    m.getAddedAt());
+        }
+    }
+}

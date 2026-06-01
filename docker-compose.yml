@@ -1,0 +1,65 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: cp
+      POSTGRES_USER: cp
+      POSTGRES_PASSWORD: cp
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cp -d cp"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  control-panel-api:
+    build:
+      context: .
+      dockerfile: control-panel-api/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/cp
+      DB_USER: cp
+      DB_PASS: cp
+      REDIS_URL: redis://redis:6379
+      APP_KEY_ENC_MASTER: ${APP_KEY_ENC_MASTER:?APP_KEY_ENC_MASTER must be set}
+    ports:
+      - "8080:8080"
+
+  sample-docker-app:
+    build:
+      context: .
+      dockerfile: sample-docker-app/Dockerfile
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./samples/license.lic:/etc/app/license.lic:ro
+
+  admin-ui:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./admin-ui:/app
+    command: sh -c "npm install && npm run dev -- --host"
+    ports:
+      - "5173:5173"
+
+volumes:
+  pg-data:

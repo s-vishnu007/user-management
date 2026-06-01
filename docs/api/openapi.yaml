@@ -1,0 +1,1782 @@
+openapi: 3.1.0
+info:
+  title: User Management Control Panel API
+  version: 0.1.0
+  description: |
+    Control-plane API for the user-management + licensing system.
+
+    Covers admin authentication, organization/user/RBAC management, plan & subscription
+    administration, license JWKS publication, key rotation, usage ingestion, audit log
+    access, SSO configuration, API key management, and the domain event stream.
+
+    Two authentication schemes are supported:
+      - **bearerAuth**: short-lived admin session JWT, issued by `POST /api/v1/auth/login`.
+      - **apiKeyAuth**: long-lived programmatic key, sent as `Authorization: ApiKey <token>`.
+
+    The public `/.well-known/jwks.json` endpoint is unauthenticated.
+
+    Error responses follow [RFC 7807 Problem Details](https://datatracker.ietf.org/doc/html/rfc7807).
+
+    > **Caveat:** the license-issuance endpoint (`POST .../licenses`) referenced in the
+    > implementation plan is *not yet wired up* in `control-panel-api`. It is documented
+    > here as the intended contract for Phase 1 closure.
+  contact:
+    name: Control Panel Team
+    email: support@control-panel.example.com
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://control-panel.example.com
+    description: Production
+  - url: https://staging.control-panel.example.com
+    description: Staging
+  - url: http://localhost:8080
+    description: Local dev
+
+tags:
+  - name: auth
+    description: Admin login, password reset, current-user info.
+  - name: orgs
+    description: Tenant organizations and their members.
+  - name: users
+    description: User profile management.
+  - name: rbac
+    description: Control-panel roles, permissions, role assignments.
+  - name: plans
+    description: Subscription plan catalog.
+  - name: subscriptions
+    description: Org subscriptions, status transitions, and overrides.
+  - name: licenses
+    description: License issuance & revocation (planned).
+  - name: keys
+    description: Signing key generation and rotation.
+  - name: jwks
+    description: Public JWKS endpoint.
+  - name: usage
+    description: Usage event ingestion and reporting.
+  - name: audit
+    description: Immutable audit log.
+  - name: sso
+    description: Per-org SAML / OIDC configuration.
+  - name: apikeys
+    description: Programmatic API key administration.
+  - name: events
+    description: Outbox-derived domain event stream.
+
+security:
+  - bearerAuth: []
+  - apiKeyAuth: []
+
+paths:
+
+  # ============================================================
+  # auth
+  # ============================================================
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Exchange email + password for an admin session JWT.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Audit the intent to log out (stateless JWT — client drops the token).
+      responses:
+        '204':
+          description: Logged out.
+
+  /api/v1/auth/password-reset/request:
+    post:
+      tags: [auth]
+      summary: Trigger a password-reset email.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequest'
+      responses:
+        '200':
+          description: Always 200, regardless of whether the email exists (no enumeration).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  reset_token:
+                    type: string
+                    description: Only present when `app.auth.expose-reset-token=true` (dev/test).
+
+  /api/v1/auth/password-reset/confirm:
+    post:
+      tags: [auth]
+      summary: Complete a password reset using a token from the email.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetConfirm'
+      responses:
+        '204':
+          description: Password updated.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      summary: Return the currently authenticated user, org memberships, and granted permissions.
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ============================================================
+  # orgs
+  # ============================================================
+  /api/v1/orgs:
+    get:
+      tags: [orgs]
+      summary: List organizations the current user belongs to.
+      responses:
+        '200':
+          description: Paged org list (single page in the current implementation).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationPage'
+    post:
+      tags: [orgs]
+      summary: Create an organization.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrganizationCreate'
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organization'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/orgs/{orgId}:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+    get:
+      tags: [orgs]
+      summary: Fetch an organization.
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organization'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/orgs/{orgId}/members:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+    get:
+      tags: [orgs]
+      summary: List members of an organization.
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrgMemberPage'
+    post:
+      tags: [orgs]
+      summary: Add a user as a member of the organization.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrgInvite'
+      responses:
+        '201':
+          description: Member added.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrgMember'
+
+  /api/v1/orgs/{orgId}/members/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+      - $ref: '#/components/parameters/UserIdParam'
+    delete:
+      tags: [orgs]
+      summary: Remove a member.
+      responses:
+        '204':
+          description: Removed.
+
+  /api/v1/orgs/{orgId}/transfer-owner:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+    post:
+      tags: [orgs]
+      summary: Transfer the OWNER role to another member.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [newOwnerUserId]
+              properties:
+                newOwnerUserId: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Owner transferred.
+
+  # ============================================================
+  # users
+  # ============================================================
+  /api/v1/users/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/UserIdParam'
+    get:
+      tags: [users]
+      summary: Get a user.
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [users]
+      summary: Update a user's profile.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdate'
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+
+  /api/v1/users/{userId}/deactivate:
+    parameters:
+      - $ref: '#/components/parameters/UserIdParam'
+    post:
+      tags: [users]
+      summary: Deactivate a user.
+      responses:
+        '204':
+          description: Deactivated.
+
+  /api/v1/users/{userId}/change-password:
+    parameters:
+      - $ref: '#/components/parameters/UserIdParam'
+    post:
+      tags: [users]
+      summary: Change own password (the caller must equal `{userId}`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [oldPassword, newPassword]
+              properties:
+                oldPassword: { type: string, format: password }
+                newPassword: { type: string, format: password, minLength: 8 }
+      responses:
+        '204':
+          description: Password changed.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ============================================================
+  # rbac
+  # ============================================================
+  /api/v1/rbac/roles:
+    get:
+      tags: [rbac]
+      summary: List all control-panel roles.
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RolePage'
+
+  /api/v1/rbac/permissions:
+    get:
+      tags: [rbac]
+      summary: List all control-panel permissions.
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PermissionPage'
+
+  /api/v1/rbac/users/{userId}/roles:
+    parameters:
+      - $ref: '#/components/parameters/UserIdParam'
+    post:
+      tags: [rbac]
+      summary: Assign a role to a user (optionally scoped to an org).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignRoleRequest'
+      responses:
+        '201':
+          description: Assigned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserRoleAssignment'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/rbac/users/{userId}/roles/{roleId}:
+    parameters:
+      - $ref: '#/components/parameters/UserIdParam'
+      - in: path
+        name: roleId
+        required: true
+        schema: { type: string, format: uuid }
+      - in: query
+        name: orgId
+        required: false
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [rbac]
+      summary: Remove a role assignment.
+      responses:
+        '204':
+          description: Removed.
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================================
+  # plans
+  # ============================================================
+  /api/v1/plans:
+    get:
+      tags: [plans]
+      summary: List plans.
+      parameters:
+        - in: query
+          name: activeOnly
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Plan'
+    post:
+      tags: [plans]
+      summary: Create a plan.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanCreate'
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plan'
+
+  /api/v1/plans/{planId}:
+    parameters:
+      - in: path
+        name: planId
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [plans]
+      summary: Get a plan.
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plan'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [plans]
+      summary: Update top-level plan attributes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanUpdate'
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plan'
+
+  /api/v1/plans/{planId}/permissions:
+    parameters:
+      - in: path
+        name: planId
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [plans]
+      summary: Replace the plan's permission set.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [permissionCodes]
+              properties:
+                permissionCodes:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plan'
+
+  /api/v1/plans/{planId}/features:
+    parameters:
+      - in: path
+        name: planId
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [plans]
+      summary: Replace the plan's feature map.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [features]
+              properties:
+                features:
+                  type: object
+                  additionalProperties: true
+                  description: |
+                    Map of feature key -> value. Permitted value types: boolean, integer, string.
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plan'
+
+  # ============================================================
+  # subscriptions
+  # ============================================================
+  /api/v1/orgs/{orgId}/subscriptions:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+    get:
+      tags: [subscriptions]
+      summary: List subscriptions for an organization.
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Subscription'
+    post:
+      tags: [subscriptions]
+      summary: Create a subscription under an organization.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubscriptionCreate'
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+
+  /api/v1/subscriptions/{subscriptionId}:
+    parameters:
+      - $ref: '#/components/parameters/SubscriptionIdParam'
+    get:
+      tags: [subscriptions]
+      summary: Get a subscription.
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+
+  /api/v1/subscriptions/{subscriptionId}/suspend:
+    parameters:
+      - $ref: '#/components/parameters/SubscriptionIdParam'
+    post:
+      tags: [subscriptions]
+      summary: Suspend an active subscription.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReasonRequest'
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+
+  /api/v1/subscriptions/{subscriptionId}/reactivate:
+    parameters:
+      - $ref: '#/components/parameters/SubscriptionIdParam'
+    post:
+      tags: [subscriptions]
+      summary: Reactivate a suspended subscription.
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+
+  /api/v1/subscriptions/{subscriptionId}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/SubscriptionIdParam'
+    post:
+      tags: [subscriptions]
+      summary: Cancel a subscription.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReasonRequest'
+      responses:
+        '200':
+          description: Cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+
+  /api/v1/subscriptions/{subscriptionId}/overrides:
+    parameters:
+      - $ref: '#/components/parameters/SubscriptionIdParam'
+    post:
+      tags: [subscriptions]
+      summary: Add a per-subscription override (permission add/remove or feature delta).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubscriptionOverride'
+      responses:
+        '200':
+          description: Added.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionOverride'
+
+  /api/v1/subscriptions/{subscriptionId}/overrides/{overrideId}:
+    parameters:
+      - $ref: '#/components/parameters/SubscriptionIdParam'
+      - in: path
+        name: overrideId
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [subscriptions]
+      summary: Remove an override.
+      responses:
+        '204':
+          description: Removed.
+
+  # ============================================================
+  # licenses (PLANNED — see info note)
+  # ============================================================
+  /api/v1/subscriptions/{subscriptionId}/licenses:
+    parameters:
+      - $ref: '#/components/parameters/SubscriptionIdParam'
+    get:
+      tags: [licenses]
+      summary: '[Planned] List licenses issued for a subscription.'
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LicenseToken'
+    post:
+      tags: [licenses]
+      summary: '[Planned] Issue a new license for the subscription.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LicenseIssueRequest'
+      responses:
+        '201':
+          description: "License issued. Set `Accept: application/vnd.example.license+json` to receive only the `.lic` envelope for direct download."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LicenseIssueResponse'
+            application/vnd.example.license+json:
+              schema:
+                $ref: '#/components/schemas/LicenseEnvelope'
+
+  /api/v1/licenses/{jti}:
+    parameters:
+      - in: path
+        name: jti
+        required: true
+        schema: { type: string }
+    get:
+      tags: [licenses]
+      summary: '[Planned] Get a license record by jti.'
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LicenseToken'
+
+  /api/v1/licenses/{jti}/revoke:
+    parameters:
+      - in: path
+        name: jti
+        required: true
+        schema: { type: string }
+    post:
+      tags: [licenses]
+      summary: '[Planned] Revoke a license.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReasonRequest'
+      responses:
+        '200':
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LicenseToken'
+
+  /api/v1/licenses/revoked:
+    get:
+      tags: [licenses]
+      summary: '[Planned] CRL — list jtis revoked since a given timestamp.'
+      parameters:
+        - in: query
+          name: since
+          required: true
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Revocation list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevocationList'
+
+  # ============================================================
+  # keys
+  # ============================================================
+  /api/v1/admin/keys:
+    get:
+      tags: [keys]
+      summary: List signing keys (public material only).
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SigningKey'
+
+  /api/v1/admin/keys/rotate:
+    post:
+      tags: [keys]
+      summary: Generate a new active Ed25519 signing key and demote the previous one.
+      responses:
+        '200':
+          description: New active key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningKey'
+
+  # ============================================================
+  # jwks (public)
+  # ============================================================
+  /.well-known/jwks.json:
+    get:
+      tags: [jwks]
+      summary: Public JWKS — non-retired signing keys.
+      security: []
+      responses:
+        '200':
+          description: JWKS.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JwksResponse'
+
+  # ============================================================
+  # usage
+  # ============================================================
+  /api/v1/usage/ingest:
+    post:
+      tags: [usage]
+      summary: Ingest a batch of usage events tied to a license.
+      description: |
+        Authenticated. The body's `jti` identifies the license that generated the events;
+        the server resolves the subscription from it and de-duplicates by `(jti, event_id)`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UsageIngestRequest'
+      responses:
+        '202':
+          description: Accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageIngestResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/subscriptions/{subscriptionId}/usage:
+    parameters:
+      - $ref: '#/components/parameters/SubscriptionIdParam'
+    get:
+      tags: [usage]
+      summary: Get events + quota rollups for a subscription.
+      parameters:
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+        - in: query
+          name: featureKey
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageReport'
+
+  # ============================================================
+  # audit
+  # ============================================================
+  /api/v1/audit:
+    get:
+      tags: [audit]
+      summary: Search the global audit log.
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/SizeParam'
+        - in: query
+          name: action
+          schema: { type: string }
+        - in: query
+          name: actor
+          schema: { type: string, format: uuid }
+        - in: query
+          name: targetType
+          schema: { type: string }
+        - in: query
+          name: targetId
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Paged audit entries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEntryPage'
+
+  /api/v1/orgs/{orgId}/audit:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+    get:
+      tags: [audit]
+      summary: Search audit entries scoped to a single organization.
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/SizeParam'
+        - in: query
+          name: action
+          schema: { type: string }
+        - in: query
+          name: actor
+          schema: { type: string, format: uuid }
+        - in: query
+          name: targetType
+          schema: { type: string }
+        - in: query
+          name: targetId
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Paged audit entries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEntryPage'
+
+  # ============================================================
+  # sso
+  # ============================================================
+  /api/v1/orgs/{orgId}/sso:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+    get:
+      tags: [sso]
+      summary: List SSO providers configured for an org.
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SsoProvider'
+    post:
+      tags: [sso]
+      summary: Configure an SSO provider (SAML 2.0 or OIDC).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SsoProviderCreate'
+      responses:
+        '200':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoProvider'
+
+  /api/v1/orgs/{orgId}/sso/{providerId}:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+      - in: path
+        name: providerId
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [sso]
+      summary: Remove an SSO provider config.
+      responses:
+        '204':
+          description: Removed.
+
+  /api/v1/orgs/{orgId}/sso/{providerId}/test:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+      - in: path
+        name: providerId
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [sso]
+      summary: Dry-run a configured SSO provider.
+      responses:
+        '200':
+          description: Test outcome.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoTestResult'
+
+  /api/v1/auth/sso/{orgSlug}/start:
+    parameters:
+      - in: path
+        name: orgSlug
+        required: true
+        schema: { type: string }
+    get:
+      tags: [sso]
+      summary: Begin an SSO login flow for an org.
+      security: []
+      responses:
+        '302':
+          description: Redirect to the IdP.
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================================
+  # api keys
+  # ============================================================
+  /api/v1/orgs/{orgId}/api-keys:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+    get:
+      tags: [apikeys]
+      summary: List API keys for an org.
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApiKey'
+    post:
+      tags: [apikeys]
+      summary: Create an org-scoped API key. The plaintext key is returned ONCE.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiKeyCreate'
+      responses:
+        '200':
+          description: Created. Save the `key` value — it is shown only here.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyCreateResponse'
+
+  /api/v1/orgs/{orgId}/api-keys/{apiKeyId}:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+      - in: path
+        name: apiKeyId
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [apikeys]
+      summary: Revoke an API key.
+      responses:
+        '204':
+          description: Revoked.
+
+  # ============================================================
+  # events
+  # ============================================================
+  /api/v1/events:
+    get:
+      tags: [events]
+      summary: Poll outbox-derived domain events.
+      parameters:
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+          description: Return events with `occurredAt >= since`.
+      responses:
+        '200':
+          description: Event list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DomainEvent'
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Admin session JWT from `POST /api/v1/auth/login`.
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: |
+        Long-lived programmatic key.
+        Format: `Authorization: ApiKey <token>` where `<token>` is the value returned
+        once by `POST /api/v1/orgs/{orgId}/api-keys`.
+
+  parameters:
+    OrgIdParam:
+      in: path
+      name: orgId
+      required: true
+      schema: { type: string, format: uuid }
+    UserIdParam:
+      in: path
+      name: userId
+      required: true
+      schema: { type: string, format: uuid }
+    SubscriptionIdParam:
+      in: path
+      name: subscriptionId
+      required: true
+      schema: { type: string, format: uuid }
+    PageParam:
+      in: query
+      name: page
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    SizeParam:
+      in: query
+      name: size
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+
+  responses:
+    BadRequest:
+      description: Request body or parameters invalid.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    Unauthorized:
+      description: Missing or invalid credentials.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    Forbidden:
+      description: Authenticated but not authorized.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    NotFound:
+      description: Resource does not exist or is hidden from this caller.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+    Conflict:
+      description: Conflicting state (e.g. unique-constraint violation).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+
+  schemas:
+
+    # ---- shared / problem ----
+    ProblemDetail:
+      type: object
+      description: RFC 7807 problem details.
+      properties:
+        type: { type: string, format: uri, example: 'about:blank' }
+        title: { type: string, example: 'Bad Request' }
+        status: { type: integer, example: 400 }
+        detail: { type: string, example: 'Field `email` is required.' }
+        instance: { type: string, format: uri }
+        code: { type: string, example: 'validation_failed' }
+      required: [title, status]
+
+    ReasonRequest:
+      type: object
+      properties:
+        reason: { type: string }
+
+    PageMeta:
+      type: object
+      properties:
+        total: { type: integer }
+        page: { type: integer }
+        size: { type: integer }
+      required: [total, page, size]
+
+    # ---- auth ----
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, format: password }
+
+    LoginResponse:
+      type: object
+      required: [accessToken, expiresAt, user]
+      properties:
+        accessToken: { type: string, description: 'Session JWT.' }
+        expiresAt: { type: string, format: date-time }
+        user: { $ref: '#/components/schemas/User' }
+
+    PasswordResetRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+
+    PasswordResetConfirm:
+      type: object
+      required: [token, newPassword]
+      properties:
+        token: { type: string }
+        newPassword: { type: string, format: password, minLength: 8 }
+
+    MeResponse:
+      type: object
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        orgs:
+          type: array
+          items: { $ref: '#/components/schemas/OrgMembership' }
+        permissions:
+          type: array
+          items: { type: string }
+      required: [user, orgs, permissions]
+
+    # ---- user ----
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        fullName: { type: string }
+        status:
+          type: string
+          enum: [ACTIVE, INVITED, DISABLED, DELETED]
+        superAdmin: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        lastLoginAt: { type: string, format: date-time, nullable: true }
+      required: [id, email, status]
+
+    UserUpdate:
+      type: object
+      properties:
+        fullName: { type: string, maxLength: 255 }
+
+    # ---- org ----
+    Organization:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        status:
+          type: string
+          enum: [ACTIVE, SUSPENDED, DELETED]
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [id, slug, name]
+
+    OrganizationCreate:
+      type: object
+      required: [slug, name]
+      properties:
+        slug:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$'
+        name:
+          type: string
+          maxLength: 255
+
+    OrganizationPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/Organization' }
+          required: [items]
+
+    OrgMember:
+      type: object
+      properties:
+        orgId: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        role:
+          type: string
+          enum: [OWNER, ADMIN, MEMBER, VIEWER]
+        addedAt: { type: string, format: date-time }
+      required: [orgId, userId, role]
+
+    OrgMembership:
+      type: object
+      properties:
+        orgId: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        role:
+          type: string
+          enum: [OWNER, ADMIN, MEMBER, VIEWER]
+      required: [orgId, role]
+
+    OrgInvite:
+      type: object
+      required: [email, role]
+      properties:
+        email: { type: string, format: email }
+        role:
+          type: string
+          enum: [OWNER, ADMIN, MEMBER, VIEWER]
+
+    OrgMemberPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/OrgMember' }
+          required: [items]
+
+    # ---- rbac ----
+    Role:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        description: { type: string }
+        isSystem: { type: boolean }
+      required: [id, code, name]
+
+    Permission:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string, example: 'subscription.write' }
+        name: { type: string }
+        description: { type: string }
+        category: { type: string }
+      required: [id, code]
+
+    RolePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/Role' }
+          required: [items]
+
+    PermissionPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/Permission' }
+          required: [items]
+
+    AssignRoleRequest:
+      type: object
+      required: [roleCode]
+      properties:
+        roleCode: { type: string }
+        orgId: { type: string, format: uuid, nullable: true }
+
+    UserRoleAssignment:
+      type: object
+      properties:
+        userId: { type: string, format: uuid }
+        roleId: { type: string, format: uuid }
+        roleCode: { type: string }
+        orgId: { type: string, format: uuid, nullable: true }
+
+    # ---- plans ----
+    Plan:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        description: { type: string }
+        tier: { type: string }
+        defaultTtlDays: { type: integer }
+        active: { type: boolean }
+        permissions:
+          type: array
+          items: { type: string }
+        features:
+          type: object
+          additionalProperties: true
+      required: [id, code, name]
+
+    PlanCreate:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, maxLength: 64 }
+        name: { type: string, maxLength: 255 }
+        description: { type: string }
+        tier: { type: string, maxLength: 32 }
+        defaultTtlDays: { type: integer }
+        active: { type: boolean }
+        permissions:
+          type: array
+          items: { type: string }
+        features:
+          type: object
+          additionalProperties: true
+
+    PlanUpdate:
+      type: object
+      properties:
+        name: { type: string, maxLength: 255 }
+        description: { type: string }
+        tier: { type: string, maxLength: 32 }
+        defaultTtlDays: { type: integer }
+        active: { type: boolean }
+
+    # ---- subscriptions ----
+    Subscription:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        planId: { type: string, format: uuid }
+        status:
+          $ref: '#/components/schemas/SubscriptionStatus'
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time }
+        seats: { type: integer }
+        notes: { type: string }
+        overrides:
+          type: array
+          items: { $ref: '#/components/schemas/SubscriptionOverrideRecord' }
+      required: [id, orgId, planId, status]
+
+    SubscriptionStatus:
+      type: string
+      enum: [ACTIVE, SUSPENDED, EXPIRED, CANCELLED]
+
+    SubscriptionCreate:
+      type: object
+      required: [planId]
+      properties:
+        planId: { type: string, format: uuid }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time }
+        seats: { type: integer, minimum: 0 }
+        notes: { type: string }
+        overrides:
+          type: array
+          items: { $ref: '#/components/schemas/SubscriptionOverride' }
+
+    SubscriptionOverride:
+      type: object
+      required: [type, key]
+      properties:
+        type:
+          type: string
+          enum: [PERMISSION, FEATURE]
+        key: { type: string }
+        op:
+          type: string
+          enum: [ADD, REMOVE, SET]
+          description: Defaults vary by type; PERMISSION uses ADD/REMOVE, FEATURE uses SET.
+        value:
+          description: For FEATURE/SET. Boolean/integer/string.
+          oneOf:
+            - type: boolean
+            - type: integer
+            - type: string
+
+    SubscriptionOverrideRecord:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        type:
+          type: string
+          enum: [PERMISSION, FEATURE]
+        key: { type: string }
+        value:
+          oneOf:
+            - type: boolean
+            - type: integer
+            - type: string
+            - type: 'null'
+
+    # ---- licenses ----
+    LicenseToken:
+      type: object
+      properties:
+        jti: { type: string }
+        subscriptionId: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        kid: { type: string }
+        plan: { type: string }
+        permissions:
+          type: array
+          items: { type: string }
+        features:
+          type: object
+          additionalProperties: true
+        seats: { type: integer }
+        issuedAt: { type: string, format: date-time }
+        notBefore: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        revokedAt: { type: string, format: date-time, nullable: true }
+        revokeReason: { type: string, nullable: true }
+        fingerprint: { type: string, description: 'SHA-256 of the compact JWT.' }
+        lastSeenAt: { type: string, format: date-time, nullable: true }
+        lastSeenIp: { type: string, nullable: true }
+        status:
+          type: string
+          enum: [ACTIVE, REVOKED, EXPIRED]
+      required: [jti, subscriptionId, kid, issuedAt, expiresAt, status]
+
+    LicenseIssueRequest:
+      type: object
+      properties:
+        audience:
+          type: string
+          description: Target audience claim. Defaults to the subscription's configured audience.
+        ttlDays:
+          type: integer
+          description: Override the plan's default TTL.
+        notBefore: { type: string, format: date-time, nullable: true }
+        notes: { type: string }
+        kid:
+          type: string
+          description: Force signing with a specific key. Defaults to the active key.
+
+    LicenseIssueResponse:
+      type: object
+      required: [token, envelope]
+      properties:
+        token: { $ref: '#/components/schemas/LicenseToken' }
+        envelope: { $ref: '#/components/schemas/LicenseEnvelope' }
+        downloadFilename: { type: string, example: 'acme-corp-pro-2026-06-01.lic' }
+
+    LicenseEnvelope:
+      type: object
+      required: [license]
+      properties:
+        license: { type: string, description: 'The compact-serialized signed JWT.' }
+        issued_at: { type: string, format: date-time }
+        customer: { type: string }
+        plan: { type: string }
+        expires_at: { type: string, format: date-time }
+        notes: { type: string }
+
+    RevocationList:
+      type: object
+      properties:
+        generatedAt: { type: string, format: date-time }
+        since: { type: string, format: date-time }
+        entries:
+          type: array
+          items:
+            type: object
+            required: [jti, revokedAt]
+            properties:
+              jti: { type: string }
+              revokedAt: { type: string, format: date-time }
+              reason: { type: string }
+      required: [generatedAt, since, entries]
+
+    # ---- keys / jwks ----
+    SigningKey:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kid: { type: string }
+        algorithm: { type: string, example: 'EdDSA' }
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE, RETIRED]
+        createdAt: { type: string, format: date-time }
+        retiredAt: { type: string, format: date-time, nullable: true }
+        publicKeyPem: { type: string, description: 'PEM-encoded Ed25519 public key.' }
+      required: [kid, algorithm, status]
+
+    JwksResponse:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            description: A JWK per RFC 7517. For this system, OKP / Ed25519.
+
+    # ---- usage ----
+    UsageEvent:
+      type: object
+      required: [featureKey, quantity, occurredAt]
+      properties:
+        featureKey: { type: string, example: 'export.pdf' }
+        quantity:
+          type: number
+          minimum: 0
+        occurredAt: { type: string, format: date-time }
+        metadata:
+          type: object
+          additionalProperties: true
+
+    UsageIngestRequest:
+      type: object
+      required: [jti, events]
+      properties:
+        jti: { type: string }
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/UsageEvent' }
+
+    UsageIngestResponse:
+      type: object
+      properties:
+        eventsAccepted: { type: integer }
+        subscriptionId: { type: string, format: uuid }
+
+    UsageQuota:
+      type: object
+      properties:
+        featureKey: { type: string }
+        periodStart: { type: string, format: date-time }
+        periodEnd: { type: string, format: date-time }
+        limit:
+          type: number
+          nullable: true
+        consumed:
+          type: number
+
+    UsageReport:
+      type: object
+      properties:
+        events:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              featureKey: { type: string }
+              quantity: { type: number }
+              occurredAt: { type: string, format: date-time }
+              jti: { type: string }
+        quotas:
+          type: array
+          items: { $ref: '#/components/schemas/UsageQuota' }
+
+    # ---- audit ----
+    AuditEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        actorUserId: { type: string, format: uuid, nullable: true }
+        actorOrgId: { type: string, format: uuid, nullable: true }
+        action: { type: string, example: 'subscription.created' }
+        targetType: { type: string }
+        targetId: { type: string }
+        payloadJson: { type: string }
+        ipAddress: { type: string, nullable: true }
+        occurredAt: { type: string, format: date-time }
+      required: [id, action, occurredAt]
+
+    AuditEntryPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          properties:
+            items:
+              type: array
+              items: { $ref: '#/components/schemas/AuditEntry' }
+          required: [items]
+
+    # ---- sso ----
+    SsoProvider:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        type:
+          type: string
+          enum: [SAML, OIDC]
+        config:
+          type: string
+          description: Serialized JSON config (provider-specific).
+        enabled: { type: boolean }
+        createdAt: { type: string, format: date-time }
+      required: [id, orgId, type, enabled]
+
+    SsoProviderCreate:
+      type: object
+      required: [type, config]
+      properties:
+        type:
+          type: string
+          enum: [SAML, OIDC]
+        config:
+          type: object
+          additionalProperties: true
+          description: Provider-specific config; see `docs/integration-guide.md`.
+
+    SsoTestResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        message: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+
+    # ---- apikeys ----
+    ApiKey:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        name: { type: string }
+        keyPrefix: { type: string }
+        scopes: { type: string, description: 'JSON-encoded list of scope codes.' }
+        createdAt: { type: string, format: date-time }
+        lastUsedAt: { type: string, format: date-time, nullable: true }
+        revokedAt: { type: string, format: date-time, nullable: true }
+      required: [id, orgId, name, keyPrefix, createdAt]
+
+    ApiKeyCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 255 }
+        scopes:
+          type: array
+          items: { type: string }
+
+    ApiKeyCreateResponse:
+      type: object
+      required: [id, name, key, keyPrefix, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        key:
+          type: string
+          description: |
+            Plaintext token. Shown only at creation; the server stores only a hashed copy.
+        keyPrefix: { type: string }
+        scopes:
+          type: array
+          items: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    # ---- events ----
+    DomainEvent:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        aggregateType: { type: string, example: 'subscription' }
+        aggregateId: { type: string }
+        eventType: { type: string, example: 'SubscriptionActivated' }
+        payloadJson: { type: string }
+        occurredAt: { type: string, format: date-time }
+        publishedAt: { type: string, format: date-time, nullable: true }
+      required: [id, aggregateType, eventType, occurredAt]

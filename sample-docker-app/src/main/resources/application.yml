@@ -1,0 +1,33 @@
+server:
+  port: 9090
+
+spring:
+  application:
+    name: sample-docker-app
+
+app:
+  license:
+    path: ${LICENSE_PATH:/etc/app/license.lic}
+    audience: ${LICENSE_AUDIENCE:docker-app-prod}
+    issuer: ${LICENSE_ISSUER:https://control-panel.example.com}
+    refresh-from-url: ${LICENSE_JWKS_URL:}
+    refresh-interval: ${LICENSE_REFRESH_INTERVAL:PT24H}
+    clock-skew: ${LICENSE_CLOCK_SKEW:PT5M}
+    read-only-on-expiry: ${LICENSE_READ_ONLY_ON_EXPIRY:true}
+    strict: ${LICENSE_STRICT:false}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,license
+  endpoint:
+    health:
+      show-details: when-authorized
+    license:
+      enabled: true
+
+logging:
+  level:
+    com.example.licenseverifier: INFO
+    com.example.sample: INFO

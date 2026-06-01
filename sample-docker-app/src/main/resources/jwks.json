@@ -1,0 +1,4 @@
+{
+  "_comment": "Placeholder JWKS. Replace this file at build/deploy time with the control panel's JWKS (or fetch dynamically via app.license.refresh-from-url). Production customers bake the issuer's public key(s) here so the verifier never has to phone home.",
+  "keys": []
+}

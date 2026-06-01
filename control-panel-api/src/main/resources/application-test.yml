@@ -1,0 +1,28 @@
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:tc:postgresql:16:///cp_test}
+    username: ${DB_USER:test}
+    password: ${DB_PASS:test}
+    driver-class-name: org.testcontainers.jdbc.ContainerDatabaseDriver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+  liquibase:
+    change-log: classpath:db/changelog/db.changelog-master.yaml
+  data:
+    redis:
+      url: ${REDIS_URL:redis://localhost:6379}
+
+app:
+  auth:
+    session-secret: dGVzdC1zZXNzaW9uLXNlY3JldC1mb3ItdGVzdGluZy1vbmx5LXBsZWFzZS1jaGFuZ2U=
+    session-ttl: PT12H
+  signing:
+    master-key: dGVzdC1tYXN0ZXIta2V5LWZvci10ZXN0aW5nLW9ubHkhIQ==
+    issuer: https://test-control-panel.example.com
+    default-audience: docker-app-test
+  licenses:
+    default-ttl-days: 365
