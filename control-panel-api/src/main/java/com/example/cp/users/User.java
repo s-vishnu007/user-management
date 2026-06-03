@@ -6,6 +6,7 @@ import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Getter;
@@ -29,6 +30,11 @@ public class User {
     @Id
     @Column(name = "id", nullable = false)
     private UUID id;
+
+    /** Optimistic-locking version; incremented on each update to prevent lost concurrent writes. */
+    @Version
+    @Column(name = "version", nullable = false)
+    private long version;
 
     // Column is PostgreSQL CITEXT (case-insensitive unique email, see 01-organizations-users.sql).
     // columnDefinition keeps Hibernate schema-validation aligned with the citext type.

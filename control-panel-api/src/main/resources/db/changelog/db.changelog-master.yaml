@@ -54,4 +54,6 @@ databaseChangeLog:
   - include:
       file: db/changelog/changes/16-keys.sql
   - include:
+      file: db/changelog/changes/17-optimistic-locking.sql
+  - include:
       file: db/changelog/changes/99-auth-password-reset.sql

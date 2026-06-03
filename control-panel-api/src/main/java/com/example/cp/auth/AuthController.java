@@ -19,12 +19,14 @@ import com.example.cp.users.UserDto;
 import com.example.cp.users.UserRepository;
 import com.example.cp.users.UserService;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.ResponseCookie;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.transaction.annotation.Transactional;
@@ -102,9 +104,14 @@ public class AuthController {
         this.exposeResetToken = exposeResetToken;
     }
 
+    /** Whether the cp_session cookie carries the Secure attribute (HTTPS-only). Off only for local dev. */
+    @Value("${app.auth.cookie-secure:true}")
+    private boolean cookieSecure;
+
     @PostMapping("/login")
     @Transactional
-    public LoginResponse login(@Valid @RequestBody LoginRequest body, HttpServletRequest request) {
+    public LoginResponse login(@Valid @RequestBody LoginRequest body, HttpServletRequest request,
+                               HttpServletResponse httpResponse) {
         String email = body.email() == null ? "" : body.email().trim();
         String ip = proxyResolver.resolveClientIp(request);
         if (loginRateLimiter.isLocked(email, ip)) {
@@ -145,7 +152,7 @@ public class AuthController {
 
         AuditContext.set("auth.login");
         AuditContext.setTarget("user", user.getId().toString());
-        return completeSession(user);
+        return completeSession(user, httpResponse);
     }
 
     /**
@@ -156,7 +163,8 @@ public class AuthController {
      */
     @PostMapping("/mfa/login")
     @Transactional
-    public LoginResponse mfaLogin(@Valid @RequestBody MfaLoginRequest body, HttpServletRequest request) {
+    public LoginResponse mfaLogin(@Valid @RequestBody MfaLoginRequest body, HttpServletRequest request,
+                                  HttpServletResponse httpResponse) {
         String ip = proxyResolver.resolveClientIp(request);
 
         // Resolve the subject either from the signed challenge or, as a fallback, by email lookup.
@@ -186,17 +194,27 @@ public class AuthController {
         loginRateLimiter.recordSuccess(user.getEmail(), ip);
         AuditContext.set("auth.login.mfa");
         AuditContext.setTarget("user", user.getId().toString());
-        return completeSession(user);
+        return completeSession(user, httpResponse);
     }
 
     /** Issues the full session token for an authenticated user and stamps last-login. */
-    private LoginResponse completeSession(User user) {
+    private LoginResponse completeSession(User user, HttpServletResponse httpResponse) {
         Set<String> authorities = authoritiesLoader.authoritiesFor(user.getId(), null, user.isSuperAdmin());
         SessionTokenService.IssuedToken issued = tokenService.issue(
                 user.getId(), user.getEmail(), user.isSuperAdmin(), authorities, user.getTokenVersion());
 
         user.setLastLoginAt(OffsetDateTime.now());
         userRepository.save(user);
+
+        // Also set the session JWT as an HttpOnly/Secure/SameSite=Lax cookie ("cp_session", accepted by
+        // JwtAuthFilter) so browser clients need not store the token in JS-readable localStorage
+        // (mitigates XSS token theft, finding #32). The accessToken is still returned in the body for
+        // non-browser/Bearer clients.
+        ResponseCookie cookie = ResponseCookie.from("cp_session", issued.token())
+                .httpOnly(true).secure(cookieSecure).sameSite("Lax").path("/")
+                .maxAge(tokenService.ttl())
+                .build();
+        httpResponse.addHeader(HttpHeaders.SET_COOKIE, cookie.toString());
 
         return LoginResponse.session(issued.token(), issued.expiresAt(), UserDto.from(user));
     }
