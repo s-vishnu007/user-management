@@ -140,8 +140,10 @@ public class SecurityConfig {
                         .addHeaderWriter(new StaticHeadersWriter(
                                 "Content-Security-Policy",
                                 "default-src 'none'; frame-ancestors 'none'")))
-                .addFilterBefore(rateLimitFilter, JwtAuthFilter.class)
+                // Add jwtAuthFilter first so JwtAuthFilter.class gets a registered order, then
+                // anchor the rate limiter relative to it (rateLimit runs before JWT auth).
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(rateLimitFilter, JwtAuthFilter.class)
                 .httpBasic(b -> b.disable())
                 .formLogin(f -> f.disable());
 

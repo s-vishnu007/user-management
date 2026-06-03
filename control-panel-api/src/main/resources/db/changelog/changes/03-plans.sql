@@ -39,13 +39,13 @@ INSERT INTO plans (code, name, description, tier, is_active, default_ttl_days) V
 
 --changeset cp:03-plan-permissions-seed
 INSERT INTO plan_permissions (plan_id, permission_code)
-SELECT p.id, code FROM plans p, (VALUES
+SELECT p.id, t.code FROM plans p, (VALUES
     ('export.csv'),
     ('api.v1')
 ) AS t(code) WHERE p.code = 'starter';
 
 INSERT INTO plan_permissions (plan_id, permission_code)
-SELECT p.id, code FROM plans p, (VALUES
+SELECT p.id, t.code FROM plans p, (VALUES
     ('export.csv'),
     ('export.pdf'),
     ('api.v1'),
@@ -54,7 +54,7 @@ SELECT p.id, code FROM plans p, (VALUES
 ) AS t(code) WHERE p.code = 'pro';
 
 INSERT INTO plan_permissions (plan_id, permission_code)
-SELECT p.id, code FROM plans p, (VALUES
+SELECT p.id, t.code FROM plans p, (VALUES
     ('export.csv'),
     ('export.pdf'),
     ('export.xlsx'),

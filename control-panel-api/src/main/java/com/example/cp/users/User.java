@@ -30,7 +30,9 @@ public class User {
     @Column(name = "id", nullable = false)
     private UUID id;
 
-    @Column(name = "email", nullable = false)
+    // Column is PostgreSQL CITEXT (case-insensitive unique email, see 01-organizations-users.sql).
+    // columnDefinition keeps Hibernate schema-validation aligned with the citext type.
+    @Column(name = "email", nullable = false, columnDefinition = "citext")
     private String email;
 
     @Column(name = "password_hash")

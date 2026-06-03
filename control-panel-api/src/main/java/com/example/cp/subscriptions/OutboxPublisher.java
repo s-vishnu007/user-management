@@ -10,7 +10,7 @@ import java.util.Map;
  * Thin transactional-outbox helper used by subscription/license/key services
  * to enqueue domain events. Agent 7 owns the delivery / NOTIFY side.
  */
-@Component
+@Component("subscriptionOutboxPublisher")
 public class OutboxPublisher {
 
     private final JdbcTemplate jdbc;

@@ -92,6 +92,12 @@ app:
       enabled: ${APP_EVENTS_LISTENER_ENABLED:false}
       poll-ms: 1000
 
+# The bucket4j Spring Boot starter auto-config requires a configured cache and would fail at
+# startup (NoCacheConfiguredException). We do not use it — rate limiting is a custom in-memory
+# RateLimitFilter built on the bucket4j-core API — so disable the starter's auto-configuration.
+bucket4j:
+  enabled: false
+
 logging:
   level:
     org.springframework.security: INFO

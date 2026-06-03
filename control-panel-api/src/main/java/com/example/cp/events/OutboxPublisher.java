@@ -14,7 +14,7 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
 
-@Component
+@Component("eventsOutboxPublisher")
 public class OutboxPublisher {
 
     private static final Logger log = LoggerFactory.getLogger(OutboxPublisher.class);
@@ -64,12 +64,10 @@ public class OutboxPublisher {
         payload.put("aggregateType", row.aggregateType);
         payload.put("aggregateId", row.aggregateId);
         String json = payload.toString();
-        jdbc.execute((java.sql.Connection c) -> {
-            try (var st = c.createStatement()) {
-                st.execute("NOTIFY " + CHANNEL + ", '" + json.replace("'", "''") + "'");
-            }
-            return null;
-        });
+        // Parameterized pg_notify avoids SQL string interpolation of the channel/payload (no
+        // injection surface, no manual quote-escaping). pg_notify(text, text) is the function form
+        // of the NOTIFY statement.
+        jdbc.update("SELECT pg_notify(?, ?)", CHANNEL, json);
     }
 
     private record UnpublishedRow(UUID id, String aggregateType, String aggregateId, String eventType) {}
