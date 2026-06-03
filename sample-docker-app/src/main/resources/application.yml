@@ -15,6 +15,11 @@ app:
     clock-skew: ${LICENSE_CLOCK_SKEW:PT5M}
     read-only-on-expiry: ${LICENSE_READ_ONLY_ON_EXPIRY:true}
     strict: ${LICENSE_STRICT:false}
+    # Signed CRL (typ=crl+jwt) published by the control panel. When set, the
+    # verifier periodically fetches and verifies it to deny revoked licenses;
+    # blank disables revocation checking (RevocationChecker.none()).
+    # Example: https://control-panel.example.com/api/v1/licenses/crl
+    crl-url: ${LICENSE_CRL_URL:}
 
 management:
   endpoints:

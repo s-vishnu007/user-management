@@ -95,6 +95,24 @@ class RequiresPermissionAspectTest {
         assertThat(sampleService.readOnlyGuarded()).isEqualTo("ok");
     }
 
+    @Test
+    void revokedDeniesMutatingMethod() {
+        when(licenseService.status()).thenReturn(LicenseService.Status.REVOKED);
+        when(license.hasPermission(eq("foo.bar"))).thenReturn(true);
+        assertThatThrownBy(() -> sampleService.guarded())
+                .isInstanceOf(LicensePermissionDeniedException.class)
+                .hasMessageContaining("REVOKED");
+    }
+
+    @Test
+    void revokedDeniesReadOnlyAnnotatedMethod() {
+        when(licenseService.status()).thenReturn(LicenseService.Status.REVOKED);
+        when(license.hasPermission(eq("foo.bar"))).thenReturn(true);
+        assertThatThrownBy(() -> sampleService.readOnlyGuarded())
+                .isInstanceOf(LicensePermissionDeniedException.class)
+                .hasMessageContaining("REVOKED");
+    }
+
     @Configuration
     @EnableAspectJAutoProxy
     static class Config {

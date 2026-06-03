@@ -44,7 +44,7 @@ public class LicenseController {
     }
 
     @PostMapping("/subscriptions/{subId}/licenses")
-    @PreAuthorize("hasAuthority('license.issue')")
+    @PreAuthorize("@tenantAccess.canIssueLicenseForSubscription(#subId)")
     public ResponseEntity<Map<String, Object>> issue(@PathVariable("subId") UUID subId,
                                                      @RequestBody(required = false) IssueRequest body) {
         Integer ttl = body == null ? null : body.ttlDays();
@@ -66,7 +66,7 @@ public class LicenseController {
     }
 
     @GetMapping("/licenses/{jti}/download")
-    @PreAuthorize("hasAuthority('license.issue') or hasAuthority('subscription.read') or @subAccess.canDownloadLicense(@licenseLookup.subscriptionId(#jti))")
+    @PreAuthorize("@tenantAccess.canReadLicenseByJti(#jti)")
     public ResponseEntity<byte[]> download(@PathVariable String jti) {
         LicenseToken token = tokenRepo.findByJti(jti)
                 .orElseThrow(() -> ApiException.notFound("License not found"));
@@ -95,7 +95,7 @@ public class LicenseController {
     }
 
     @PostMapping("/licenses/{jti}/revoke")
-    @PreAuthorize("hasAuthority('license.revoke')")
+    @PreAuthorize("@tenantAccess.canRevokeLicenseByJti(#jti) or hasAuthority('SUPER_ADMIN')")
     public ResponseEntity<Void> revoke(@PathVariable String jti,
                                        @Valid @RequestBody(required = false) RevokeRequest body) {
         UUID actor = SecurityUtils.currentUser().map(u -> u.userId()).orElse(null);
@@ -104,25 +104,23 @@ public class LicenseController {
     }
 
     @GetMapping("/licenses")
-    @PreAuthorize("hasAuthority('subscription.read') or hasAuthority('license.issue')")
-    public List<LicenseDto> list(@RequestParam(required = false) UUID subscriptionId,
+    @PreAuthorize("@tenantAccess.canReadSubscription(#subscriptionId)")
+    public List<LicenseDto> list(@RequestParam UUID subscriptionId,
                                  @RequestParam(required = false) String status) {
+        // subscriptionId is REQUIRED: an unscoped, cross-org license enumeration is a tenant leak.
+        // The caller is authorized against the subscription's owning org by @tenantAccess above.
         List<LicenseToken> rows;
-        if (subscriptionId != null && status != null) {
+        if (status != null) {
             rows = tokenRepo.findBySubscriptionIdAndStatusOrderByIssuedAtDesc(
                     subscriptionId, LicenseToken.Status.valueOf(status.toUpperCase()));
-        } else if (subscriptionId != null) {
-            rows = tokenRepo.findBySubscriptionIdOrderByIssuedAtDesc(subscriptionId);
-        } else if (status != null) {
-            rows = tokenRepo.findByStatusOrderByIssuedAtDesc(LicenseToken.Status.valueOf(status.toUpperCase()));
         } else {
-            rows = tokenRepo.findAll();
+            rows = tokenRepo.findBySubscriptionIdOrderByIssuedAtDesc(subscriptionId);
         }
         return rows.stream().map(LicenseDto::from).toList();
     }
 
     @GetMapping("/licenses/{jti}")
-    @PreAuthorize("hasAuthority('subscription.read') or hasAuthority('license.issue')")
+    @PreAuthorize("@tenantAccess.canReadLicenseByJti(#jti)")
     public LicenseDto getOne(@PathVariable String jti) {
         return LicenseDto.from(
                 tokenRepo.findByJti(jti).orElseThrow(() -> ApiException.notFound("License not found"))

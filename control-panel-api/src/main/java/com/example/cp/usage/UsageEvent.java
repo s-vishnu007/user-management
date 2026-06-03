@@ -35,6 +35,9 @@ public class UsageEvent {
     @Column(name = "jti", length = 64)
     private String jti;
 
+    @Column(name = "event_id", length = 120)
+    private String eventId;
+
     @Column(name = "feature_key", nullable = false, length = 64)
     private String featureKey;
 

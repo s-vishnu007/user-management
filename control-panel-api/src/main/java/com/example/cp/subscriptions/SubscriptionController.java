@@ -26,13 +26,13 @@ public class SubscriptionController {
     }
 
     @GetMapping("/orgs/{orgId}/subscriptions")
-    @PreAuthorize("@subAccess.isOrgMember(#orgId) or hasAuthority('subscription.read')")
+    @PreAuthorize("@tenantAccess.canReadSubscriptionInOrg(#orgId)")
     public List<SubscriptionDto> listByOrg(@PathVariable UUID orgId) {
         return subService.listByOrg(orgId).stream().map(subService::toDto).toList();
     }
 
     @PostMapping("/orgs/{orgId}/subscriptions")
-    @PreAuthorize("hasAuthority('subscription.write')")
+    @PreAuthorize("@tenantAccess.canWriteSubscriptionInOrg(#orgId)")
     public ResponseEntity<SubscriptionDto> create(@PathVariable UUID orgId,
                                                   @Valid @RequestBody CreateSubscriptionRequest body) {
         Subscription s = subService.createSubscription(
@@ -45,31 +45,31 @@ public class SubscriptionController {
     }
 
     @GetMapping("/subscriptions/{id}")
-    @PreAuthorize("@subAccess.canReadSubscription(#id)")
+    @PreAuthorize("@tenantAccess.canReadSubscription(#id)")
     public SubscriptionDto get(@PathVariable UUID id) {
         return subService.toDto(subService.get(id));
     }
 
     @PostMapping("/subscriptions/{id}/suspend")
-    @PreAuthorize("hasAuthority('subscription.write')")
+    @PreAuthorize("@tenantAccess.canWriteSubscription(#id)")
     public SubscriptionDto suspend(@PathVariable UUID id, @RequestBody(required = false) ReasonRequest body) {
         return subService.toDto(subService.suspend(id, body == null ? null : body.reason()));
     }
 
     @PostMapping("/subscriptions/{id}/reactivate")
-    @PreAuthorize("hasAuthority('subscription.write')")
+    @PreAuthorize("@tenantAccess.canWriteSubscription(#id)")
     public SubscriptionDto reactivate(@PathVariable UUID id) {
         return subService.toDto(subService.reactivate(id));
     }
 
     @PostMapping("/subscriptions/{id}/cancel")
-    @PreAuthorize("hasAuthority('subscription.write')")
+    @PreAuthorize("@tenantAccess.canWriteSubscription(#id)")
     public SubscriptionDto cancel(@PathVariable UUID id, @RequestBody(required = false) ReasonRequest body) {
         return subService.toDto(subService.cancel(id, body == null ? null : body.reason()));
     }
 
     @PostMapping("/subscriptions/{id}/overrides")
-    @PreAuthorize("hasAuthority('subscription.write')")
+    @PreAuthorize("@tenantAccess.canWriteSubscription(#id)")
     public SubscriptionDto.OverrideDto addOverride(@PathVariable UUID id,
                                                     @Valid @RequestBody SubscriptionService.OverrideRequest body) {
         SubscriptionOverride ov = subService.addOverride(id, body);
@@ -78,7 +78,7 @@ public class SubscriptionController {
     }
 
     @DeleteMapping("/subscriptions/{id}/overrides/{overrideId}")
-    @PreAuthorize("hasAuthority('subscription.write')")
+    @PreAuthorize("@tenantAccess.canWriteSubscription(#id)")
     public ResponseEntity<Void> removeOverride(@PathVariable UUID id, @PathVariable UUID overrideId) {
         subService.removeOverride(id, overrideId);
         return ResponseEntity.noContent().build();

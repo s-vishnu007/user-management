@@ -22,4 +22,6 @@ public interface UsageEventRepository extends JpaRepository<UsageEvent, UUID> {
     List<UsageEvent> findInRange(@Param("subId") UUID subscriptionId,
                                  @Param("from") OffsetDateTime from,
                                  @Param("to") OffsetDateTime to);
+
+    boolean existsBySubscriptionIdAndJtiAndEventId(UUID subscriptionId, String jti, String eventId);
 }

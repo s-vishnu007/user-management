@@ -35,4 +35,14 @@ public final class SecurityUtils {
     public static boolean isAuthenticated() {
         return currentUser().isPresent();
     }
+
+    /**
+     * The caller's bound org id. For an api-key principal this is the key's org; for human
+     * principals (or when unauthenticated) it is empty.
+     */
+    public static Optional<UUID> currentOrgId() {
+        return currentUser()
+                .filter(AuthenticatedUser::isApiKey)
+                .map(AuthenticatedUser::apiKeyOrgId);
+    }
 }

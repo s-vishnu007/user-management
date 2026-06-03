@@ -26,7 +26,8 @@ public class RequiresPermissionAspect {
 
         LicenseService.Status status = licenseService.status();
         if (status == LicenseService.Status.NOT_LOADED
-                || status == LicenseService.Status.EXPIRED) {
+                || status == LicenseService.Status.EXPIRED
+                || status == LicenseService.Status.REVOKED) {
             throw new LicensePermissionDeniedException(
                     requiredCode(rp),
                     "License is not active (status=" + status + ")");

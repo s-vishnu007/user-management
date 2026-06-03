@@ -29,7 +29,7 @@ public class ApiKeyController {
     }
 
     @PostMapping
-    @PreAuthorize("hasAuthority('apikey.write') or @orgAccess.isOwnerOrAdmin(#orgId)")
+    @PreAuthorize("@tenantAccess.canManageOrg(#orgId)")
     public CreateResponse create(@PathVariable UUID orgId, @Valid @RequestBody CreateRequest body) {
         ApiKeyService.CreateResult result = service.create(orgId, body.name(), body.scopes());
         AuditContext.set("apikey.created");
@@ -38,15 +38,15 @@ public class ApiKeyController {
     }
 
     @GetMapping
-    @PreAuthorize("hasAuthority('apikey.read') or @orgAccess.isMember(#orgId)")
+    @PreAuthorize("@tenantAccess.canAccessOrg(#orgId)")
     public List<ApiKeyDto> list(@PathVariable UUID orgId) {
         return service.listForOrg(orgId).stream().map(ApiKeyDto::from).toList();
     }
 
     @DeleteMapping("/{id}")
-    @PreAuthorize("hasAuthority('apikey.write') or @orgAccess.isOwnerOrAdmin(#orgId)")
+    @PreAuthorize("@tenantAccess.canManageOrg(#orgId)")
     public ResponseEntity<Void> revoke(@PathVariable UUID orgId, @PathVariable UUID id) {
-        service.revoke(id);
+        service.revoke(orgId, id);
         return ResponseEntity.noContent().build();
     }
 

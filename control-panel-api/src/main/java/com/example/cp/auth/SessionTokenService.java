@@ -35,9 +35,9 @@ public class SessionTokenService {
 
     public SessionTokenService(
             @Value("${app.auth.session-secret:}") String secret,
-            @Value("${app.auth.session-ttl:PT12H}") Duration ttl) {
+            @Value("${app.auth.session-ttl:PT30M}") Duration ttl) {
         this.secret = secret == null ? "" : secret;
-        this.ttl = ttl == null ? Duration.ofHours(12) : ttl;
+        this.ttl = ttl == null ? Duration.ofMinutes(30) : ttl;
     }
 
     @PostConstruct
@@ -52,7 +52,8 @@ public class SessionTokenService {
         }
     }
 
-    public IssuedToken issue(UUID userId, String email, boolean superAdmin, Collection<String> authorities) {
+    public IssuedToken issue(UUID userId, String email, boolean superAdmin, Collection<String> authorities,
+                             long tokenVersion) {
         Instant now = Instant.now();
         Instant exp = now.plus(ttl);
         try {
@@ -63,6 +64,7 @@ public class SessionTokenService {
                     .claim("email", email)
                     .claim("super_admin", superAdmin)
                     .claim("authorities", authoritiesCompact)
+                    .claim("tv", tokenVersion)
                     .issueTime(Date.from(now))
                     .expirationTime(Date.from(exp))
                     .jwtID(UUID.randomUUID().toString())
@@ -102,8 +104,11 @@ public class SessionTokenService {
             if (authoritiesCompact != null && !authoritiesCompact.isBlank()) {
                 authorities.addAll(List.of(authoritiesCompact.split(",")));
             }
+            String jti = claims.getJWTID();
+            Long tvObj = claims.getLongClaim("tv");
+            long tv = tvObj == null ? 0L : tvObj;
             return new ParsedToken(userId, email, superAdmin, authorities,
-                    exp == null ? null : exp.toInstant());
+                    exp == null ? null : exp.toInstant(), jti, tv);
         } catch (ParseException | JOSEException e) {
             throw ApiException.unauthorized("Invalid token");
         }
@@ -115,5 +120,6 @@ public class SessionTokenService {
 
     public record IssuedToken(String token, Instant expiresAt) {}
 
-    public record ParsedToken(UUID userId, String email, boolean superAdmin, Set<String> authorities, Instant expiresAt) {}
+    public record ParsedToken(UUID userId, String email, boolean superAdmin, Set<String> authorities,
+                              Instant expiresAt, String jti, long tokenVersion) {}
 }

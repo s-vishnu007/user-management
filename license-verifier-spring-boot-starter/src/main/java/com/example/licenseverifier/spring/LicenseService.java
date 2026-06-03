@@ -2,6 +2,7 @@ package com.example.licenseverifier.spring;
 
 import com.example.licenseverifier.License;
 import com.example.licenseverifier.LicenseVerifier;
+import com.example.licenseverifier.RevocationChecker;
 import com.example.licenseverifier.exceptions.LicenseException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -25,16 +26,23 @@ public class LicenseService {
         ACTIVE,
         EXPIRED,
         NOT_LOADED,
-        READ_ONLY
+        READ_ONLY,
+        REVOKED
     }
 
     private final LicenseVerifier verifier;
     private final LicenseProperties properties;
+    private final RevocationChecker revocationChecker;
     private final AtomicReference<License> current = new AtomicReference<>();
 
-    public LicenseService(LicenseVerifier verifier, LicenseProperties properties) {
+    public LicenseService(
+            LicenseVerifier verifier,
+            LicenseProperties properties,
+            RevocationChecker revocationChecker) {
         this.verifier = verifier;
         this.properties = properties;
+        this.revocationChecker =
+                revocationChecker != null ? revocationChecker : RevocationChecker.none();
     }
 
     /**
@@ -117,6 +125,14 @@ public class LicenseService {
         License lic = current.get();
         if (lic == null) {
             return Status.NOT_LOADED;
+        }
+        // Revocation wins over READ_ONLY/EXPIRED: a license listed on the CRL (or a CRL that has
+        // gone stale, fail-closed) denies all access. This covers licenses revoked AFTER they were
+        // loaded; verify() already rejects a jti revoked before load. A non-operational checker
+        // (stale/never-loaded CRL) denies everything regardless of jti.
+        if (!revocationChecker.isOperational()
+                || (lic.jti() != null && revocationChecker.isRevoked(lic.jti()))) {
+            return Status.REVOKED;
         }
         if (isExpired(lic)) {
             return properties.isReadOnlyOnExpiry() ? Status.READ_ONLY : Status.EXPIRED;

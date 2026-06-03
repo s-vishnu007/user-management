@@ -2,6 +2,8 @@ package com.example.cp.audit;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import lombok.AllArgsConstructor;
@@ -54,4 +56,8 @@ public class AuditLog {
 
     @Column(name = "occurred_at", nullable = false)
     private OffsetDateTime occurredAt;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "outcome", nullable = false, length = 16)
+    private AuditOutcome outcome;
 }

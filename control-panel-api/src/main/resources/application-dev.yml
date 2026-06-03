@@ -1,0 +1,23 @@
+# Local development profile overrides (spring.profiles.active=dev).
+#
+# WARNING: This file MUST NEVER be activated in production. It intentionally
+# relaxes security so local developers can self-service password resets and
+# debug from a browser dev server. Confirm no prod deployment sets
+# spring.profiles.active=dev. The base application.yml keeps every one of these
+# values at its safe (prod) default, so accidental packaging of this file is
+# harmless unless the dev profile is explicitly activated.
+
+app:
+  auth:
+    # Return the raw password-reset token in the API response so local devs can
+    # complete a reset without an email server. Prod default (application.yml) is false.
+    expose-reset-token: true
+  cors:
+    # Permissive CORS for local front-end dev servers (Vite default + alternates).
+    allowed-origins: http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000
+
+management:
+  endpoint:
+    health:
+      # Full component breakdown is convenient when debugging locally.
+      show-details: always

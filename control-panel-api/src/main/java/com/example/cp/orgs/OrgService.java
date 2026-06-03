@@ -93,9 +93,18 @@ public class OrgService {
     }
 
     @Transactional
-    public OrgMember addMember(UUID orgId, String email, OrgMember.Role role) {
+    public OrgMember addMember(UUID orgId, String email, OrgMember.Role role, OrgMember.Role actorRole) {
         if (role == null) {
             throw ApiException.badRequest("Role is required");
+        }
+        if (actorRole == null) {
+            throw ApiException.forbidden("Not a member of this organization");
+        }
+        if (rank(role) > rank(actorRole)) {
+            throw ApiException.forbidden("Cannot grant a role that outranks your own");
+        }
+        if (role == OrgMember.Role.OWNER && actorRole != OrgMember.Role.OWNER) {
+            throw ApiException.forbidden("Only an OWNER can grant OWNER");
         }
         Organization org = get(orgId);
         User user = userRepository.findByEmail(email)
@@ -114,6 +123,15 @@ public class OrgService {
         AuditContext.setTarget("org_member", orgId + ":" + user.getId());
         AuditContext.putPayload("role", role.name());
         return saved;
+    }
+
+    private int rank(OrgMember.Role r) {
+        return switch (r) {
+            case OWNER -> 4;
+            case ADMIN -> 3;
+            case MEMBER -> 2;
+            case VIEWER -> 1;
+        };
     }
 
     @Transactional

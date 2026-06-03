@@ -77,13 +77,14 @@ public class AuditController {
             String targetId,
             String payloadJson,
             String ipAddress,
-            OffsetDateTime occurredAt
+            OffsetDateTime occurredAt,
+            AuditOutcome outcome
     ) {
         static AuditLogDto from(AuditLog a) {
             return new AuditLogDto(
                     a.getId(), a.getActorUserId(), a.getActorOrgId(),
                     a.getAction(), a.getTargetType(), a.getTargetId(),
-                    a.getPayloadJson(), a.getIpAddress(), a.getOccurredAt());
+                    a.getPayloadJson(), a.getIpAddress(), a.getOccurredAt(), a.getOutcome());
         }
     }
 }

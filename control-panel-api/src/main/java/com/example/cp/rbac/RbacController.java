@@ -2,7 +2,9 @@ package com.example.cp.rbac;
 
 import com.example.cp.common.ApiException;
 import com.example.cp.common.AuditContext;
+import com.example.cp.common.AuthenticatedUser;
 import com.example.cp.common.PagedResponse;
+import com.example.cp.common.SecurityUtils;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.http.ResponseEntity;
@@ -26,34 +28,41 @@ public class RbacController {
     private final RoleRepository roleRepository;
     private final PermissionRepository permissionRepository;
     private final UserRoleRepository userRoleRepository;
+    private final RbacAuthorizationService rbacAuthz;
 
     public RbacController(RoleRepository roleRepository,
                           PermissionRepository permissionRepository,
-                          UserRoleRepository userRoleRepository) {
+                          UserRoleRepository userRoleRepository,
+                          RbacAuthorizationService rbacAuthz) {
         this.roleRepository = roleRepository;
         this.permissionRepository = permissionRepository;
         this.userRoleRepository = userRoleRepository;
+        this.rbacAuthz = rbacAuthz;
     }
 
     @GetMapping("/roles")
+    @PreAuthorize("hasAuthority('rbac.read')")
     public PagedResponse<RoleDto> listRoles() {
         List<RoleDto> items = roleRepository.findAll().stream().map(RoleDto::from).toList();
         return PagedResponse.of(items, items.size(), 0, items.size());
     }
 
     @GetMapping("/permissions")
+    @PreAuthorize("hasAuthority('rbac.read')")
     public PagedResponse<PermissionDto> listPermissions() {
         List<PermissionDto> items = permissionRepository.findAll().stream().map(PermissionDto::from).toList();
         return PagedResponse.of(items, items.size(), 0, items.size());
     }
 
     @PostMapping("/users/{userId}/roles")
-    @PreAuthorize("hasAuthority('user.write')")
+    @PreAuthorize("hasAuthority('role.assign')")
     @Transactional
     public ResponseEntity<UserRoleDto> assignRole(@PathVariable UUID userId,
                                                   @Valid @RequestBody AssignRoleRequest body) {
         Role role = roleRepository.findByCode(body.roleCode())
                 .orElseThrow(() -> ApiException.notFound("Role not found"));
+        AuthenticatedUser actor = SecurityUtils.requireUser();
+        rbacAuthz.assertCanAssign(actor, role, userId, body.orgId());
         if (userRoleRepository.countAssignment(userId, role.getId(), body.orgId()) > 0) {
             throw ApiException.conflict("Role already assigned");
         }
@@ -70,7 +79,7 @@ public class RbacController {
     }
 
     @DeleteMapping("/users/{userId}/roles/{roleId}")
-    @PreAuthorize("hasAuthority('user.write')")
+    @PreAuthorize("hasAuthority('role.assign')")
     @Transactional
     public ResponseEntity<Void> removeRole(@PathVariable UUID userId,
                                            @PathVariable UUID roleId,

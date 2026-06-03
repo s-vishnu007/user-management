@@ -1,5 +1,6 @@
 package com.example.cp.orgs;
 
+import com.example.cp.common.AuthenticatedUser;
 import com.example.cp.common.PagedResponse;
 import com.example.cp.common.SecurityUtils;
 import jakarta.validation.Valid;
@@ -72,7 +73,12 @@ public class OrgController {
         } catch (IllegalArgumentException ex) {
             throw com.example.cp.common.ApiException.badRequest("Invalid role; must be OWNER, ADMIN, MEMBER, or VIEWER");
         }
-        OrgMember saved = orgService.addMember(orgId, body.email(), role);
+        AuthenticatedUser actor = SecurityUtils.requireUser();
+        OrgMember.Role actorRole = actor.superAdmin()
+                ? OrgMember.Role.OWNER
+                : orgService.roleOf(orgId, actor.userId())
+                        .orElseThrow(() -> com.example.cp.common.ApiException.forbidden("Not a member of this organization"));
+        OrgMember saved = orgService.addMember(orgId, body.email(), role, actorRole);
         return ResponseEntity.status(201).body(OrgMemberDto.from(saved));
     }
 

@@ -3,22 +3,23 @@ services:
     image: postgres:16
     environment:
       POSTGRES_DB: cp
-      POSTGRES_USER: cp
-      POSTGRES_PASSWORD: cp
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-cp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    # Host port publishing intentionally removed: postgres is reachable only on
+    # the compose network as postgres:5432. For local debugging, bind to
+    # 127.0.0.1 only, e.g.  ports: ["127.0.0.1:5432:5432"].
     volumes:
       - pg-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cp -d cp"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cp} -d cp"]
       interval: 5s
       timeout: 5s
       retries: 10
 
   redis:
     image: redis:7
-    ports:
-      - "6379:6379"
+    # Host port publishing intentionally removed: redis is reachable only on the
+    # compose network as redis:6379. For local debugging, bind 127.0.0.1 only.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -36,10 +37,12 @@ services:
         condition: service_healthy
     environment:
       DB_URL: jdbc:postgresql://postgres:5432/cp
-      DB_USER: cp
-      DB_PASS: cp
+      DB_USER: ${POSTGRES_USER:-cp}
+      DB_PASS: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       REDIS_URL: redis://redis:6379
       APP_KEY_ENC_MASTER: ${APP_KEY_ENC_MASTER:?APP_KEY_ENC_MASTER must be set}
+      APP_AUTH_SESSION_SECRET: ${APP_AUTH_SESSION_SECRET:?APP_AUTH_SESSION_SECRET must be set (>=32 chars)}
+      APP_CORS_ALLOWED_ORIGINS: ${APP_CORS_ALLOWED_ORIGINS:-http://localhost:5173}
     ports:
       - "8080:8080"
 

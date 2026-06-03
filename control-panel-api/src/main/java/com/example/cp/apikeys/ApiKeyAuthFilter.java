@@ -48,7 +48,7 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
                             .map(SimpleGrantedAuthority::new)
                             .collect(Collectors.toList());
                     AuthenticatedUser principal = new AuthenticatedUser(
-                            null, "apikey:" + key.getId(), false, scopes, authorities);
+                            null, "apikey:" + key.getId(), false, scopes, authorities, true, key.getOrgId());
                     ApiKeyAuthentication token = new ApiKeyAuthentication(principal, authorities, key.getOrgId());
                     token.setAuthenticated(true);
                     SecurityContextHolder.getContext().setAuthentication(token);

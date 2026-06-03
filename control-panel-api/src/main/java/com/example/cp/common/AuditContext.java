@@ -1,5 +1,7 @@
 package com.example.cp.common;
 
+import com.example.cp.audit.AuditOutcome;
+
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -34,6 +36,22 @@ public final class AuditContext {
         CTX.get().ip = ip;
     }
 
+    public static void setOutcome(AuditOutcome o) {
+        CTX.get().outcome = o == null ? AuditOutcome.SUCCESS : o;
+    }
+
+    public static void markFailClosed() {
+        CTX.get().failClosed = true;
+    }
+
+    /**
+     * Sentinel set by an explicit audit write so the {@code AuditInterceptor} advice and
+     * {@code GlobalExceptionHandler} fallback skip writing a duplicate row for the same request.
+     */
+    public static void markRecorded() {
+        CTX.get().recorded = true;
+    }
+
     public static String currentAction() {
         return CTX.get().action;
     }
@@ -62,6 +80,18 @@ public final class AuditContext {
         return CTX.get().ip;
     }
 
+    public static AuditOutcome currentOutcome() {
+        return CTX.get().outcome;
+    }
+
+    public static boolean isFailClosed() {
+        return CTX.get().failClosed;
+    }
+
+    public static boolean isRecorded() {
+        return CTX.get().recorded;
+    }
+
     public static void clear() {
         CTX.remove();
     }
@@ -73,6 +103,9 @@ public final class AuditContext {
         UUID actorUserId;
         UUID actorOrgId;
         String ip;
+        AuditOutcome outcome = AuditOutcome.SUCCESS;
+        boolean failClosed = false;
+        boolean recorded = false;
         Map<String, Object> payload = new HashMap<>();
     }
 }

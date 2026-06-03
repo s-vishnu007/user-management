@@ -5,6 +5,7 @@ import com.example.cp.common.AuditContext;
 import com.example.cp.common.Ids;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -14,6 +15,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.OffsetDateTime;
 import java.util.HexFormat;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -28,14 +30,34 @@ public class ApiKeyService {
     private final ApiKeyRepository repo;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    public ApiKeyService(ApiKeyRepository repo) {
+    /**
+     * Org-scoped allow-list constraining which scopes an API key may be created with. This prevents
+     * minting keys carrying global/cross-org authorities (e.g. {@code subscription.read},
+     * {@code license.issue}, {@code subscription.write}, any {@code *.write}). Sourced from
+     * {@code app.api-keys.creatable-scopes}; the default mirrors the design contract.
+     */
+    private final Set<String> creatableScopes;
+
+    public ApiKeyService(ApiKeyRepository repo,
+                         @Value("${app.api-keys.creatable-scopes:usage.ingest,usage.read,license.read}")
+                         Set<String> creatableScopes) {
         this.repo = repo;
+        this.creatableScopes = creatableScopes == null ? Set.of() : Set.copyOf(creatableScopes);
     }
 
     public record CreateResult(ApiKey apiKey, String plaintextKey) {}
 
     @Transactional
     public CreateResult create(UUID orgId, String name, Set<String> scopes) {
+        Set<String> requested = scopes == null ? Set.of() : new LinkedHashSet<>(scopes);
+        // Constrain creatable scopes to the org-scoped allow-list so an API key can never be minted
+        // with a global/cross-org authority (subscription.read, subscription.write, license.issue,
+        // license.revoke, apikey.write, any *.write, etc).
+        for (String s : requested) {
+            if (s == null || !creatableScopes.contains(s)) {
+                throw ApiException.badRequest("Scope not permitted for API keys: " + s);
+            }
+        }
         byte[] raw = new byte[32];
         RNG.nextBytes(raw);
         String plaintext = "cp_" + base32(raw);
@@ -43,7 +65,7 @@ public class ApiKeyService {
         String hash = sha256Hex(plaintext);
         String scopesJson;
         try {
-            scopesJson = mapper.writeValueAsString(scopes == null ? Set.of() : scopes);
+            scopesJson = mapper.writeValueAsString(requested);
         } catch (JsonProcessingException e) {
             throw ApiException.badRequest("Invalid scopes: " + e.getMessage());
         }
@@ -82,8 +104,14 @@ public class ApiKeyService {
     }
 
     @Transactional
-    public void revoke(UUID id) {
+    public void revoke(UUID orgId, UUID id) {
         ApiKey k = repo.findById(id).orElseThrow(() -> ApiException.notFound("API key not found"));
+        // Org-scope the lookup: a key that does not belong to the caller's org is reported as
+        // not found (404, not 403) to avoid cross-org existence disclosure. Closes the IDOR where
+        // any apikey.write holder could revoke keys in other orgs.
+        if (orgId == null || !orgId.equals(k.getOrgId())) {
+            throw ApiException.notFound("API key not found");
+        }
         if (k.getRevokedAt() == null) {
             k.setRevokedAt(OffsetDateTime.now());
             repo.save(k);

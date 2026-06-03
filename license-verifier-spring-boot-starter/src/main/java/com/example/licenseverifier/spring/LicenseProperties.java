@@ -30,6 +30,28 @@ public class LicenseProperties {
     /** If true, refuse to start the context when the license is missing or invalid. */
     private boolean strict = true;
 
+    /**
+     * Absolute URL of the signed CRL endpoint (e.g.
+     * {@code https://control-panel/api/v1/licenses/crl}). If null/blank, revocation
+     * checking is disabled and {@link com.example.licenseverifier.RevocationChecker#none()} is wired.
+     */
+    private String crlUrl;
+
+    /** How often to re-fetch the signed CRL. */
+    private Duration crlRefreshInterval = Duration.ofMinutes(15);
+
+    /**
+     * Grace period past the CRL's {@code nextUpdate} before the cached list is treated as stale
+     * and the checker fails closed (denies all guarded calls).
+     */
+    private Duration crlMaxStale = Duration.ofHours(1);
+
+    /**
+     * When true (default), a missing/stale CRL fails closed: the checker becomes non-operational
+     * and all guarded calls are denied. Set false to let an operator opt the behavior off.
+     */
+    private boolean crlFailClosed = true;
+
     public String getPath() {
         return path;
     }
@@ -92,5 +114,37 @@ public class LicenseProperties {
 
     public void setStrict(boolean strict) {
         this.strict = strict;
+    }
+
+    public String getCrlUrl() {
+        return crlUrl;
+    }
+
+    public void setCrlUrl(String crlUrl) {
+        this.crlUrl = crlUrl;
+    }
+
+    public Duration getCrlRefreshInterval() {
+        return crlRefreshInterval;
+    }
+
+    public void setCrlRefreshInterval(Duration crlRefreshInterval) {
+        this.crlRefreshInterval = crlRefreshInterval;
+    }
+
+    public Duration getCrlMaxStale() {
+        return crlMaxStale;
+    }
+
+    public void setCrlMaxStale(Duration crlMaxStale) {
+        this.crlMaxStale = crlMaxStale;
+    }
+
+    public boolean isCrlFailClosed() {
+        return crlFailClosed;
+    }
+
+    public void setCrlFailClosed(boolean crlFailClosed) {
+        this.crlFailClosed = crlFailClosed;
     }
 }

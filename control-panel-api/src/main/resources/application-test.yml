@@ -20,6 +20,7 @@ app:
   auth:
     session-secret: dGVzdC1zZXNzaW9uLXNlY3JldC1mb3ItdGVzdGluZy1vbmx5LXBsZWFzZS1jaGFuZ2U=
     session-ttl: PT12H
+    expose-reset-token: false
   signing:
     master-key: dGVzdC1tYXN0ZXIta2V5LWZvci10ZXN0aW5nLW9ubHkhIQ==
     issuer: https://test-control-panel.example.com

@@ -4,18 +4,13 @@ import com.example.licenseverifier.exceptions.LicenseAudienceMismatchException;
 import com.example.licenseverifier.exceptions.LicenseExpiredException;
 import com.example.licenseverifier.exceptions.LicenseFileMalformedException;
 import com.example.licenseverifier.exceptions.LicenseIssuerMismatchException;
-import com.example.licenseverifier.exceptions.LicenseKidUnknownException;
 import com.example.licenseverifier.exceptions.LicenseNotYetValidException;
+import com.example.licenseverifier.exceptions.LicenseRevokedException;
 import com.example.licenseverifier.exceptions.LicenseSignatureInvalidException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.JWSVerifier;
-import com.nimbusds.jose.crypto.Ed25519Verifier;
-import com.nimbusds.jose.jwk.Curve;
-import com.nimbusds.jose.jwk.JWK;
-import com.nimbusds.jose.jwk.OctetKeyPair;
-import com.nimbusds.jose.util.Base64URL;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 
@@ -25,13 +20,10 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.PublicKey;
-import java.security.interfaces.EdECPublicKey;
 import java.text.ParseException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
@@ -39,7 +31,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 
 public final class LicenseVerifier {
@@ -52,6 +43,7 @@ public final class LicenseVerifier {
     private final String issuer;
     private final Duration clockSkew;
     private final Clock clock;
+    private final RevocationChecker revocationChecker;
 
     private LicenseVerifier(Builder b) {
         this.keyProvider = Objects.requireNonNull(b.keyProvider, "publicKeys must be configured");
@@ -59,6 +51,7 @@ public final class LicenseVerifier {
         this.issuer = b.issuer;
         this.clockSkew = b.clockSkew != null ? b.clockSkew : Duration.ZERO;
         this.clock = b.clock != null ? b.clock : Clock.systemUTC();
+        this.revocationChecker = b.revocationChecker != null ? b.revocationChecker : RevocationChecker.none();
     }
 
     public static Builder builder() {
@@ -144,69 +137,36 @@ public final class LicenseVerifier {
         validateTemporalClaims(claims);
         validateAudience(claims);
         validateIssuer(claims);
+        checkRevocation(claims.getJWTID());
 
         return toLicense(claims, kid);
     }
 
-    private JWSVerifier resolveVerifier(String kid) {
-        // Preferred path: built-in providers expose the original JWK so we get the exact raw
-        // Ed25519 encoding from the JWKS without going through PublicKey.
-        if (keyProvider instanceof PublicKeyProvider.JwkProvider jwkProvider) {
-            Optional<JWK> jwk = jwkProvider.findJwkByKid(kid);
-            if (jwk.isPresent()) {
-                if (jwk.get() instanceof OctetKeyPair okp && Curve.Ed25519.equals(okp.getCurve())) {
-                    try {
-                        return new Ed25519Verifier(okp);
-                    } catch (Exception e) {
-                        throw new LicenseSignatureInvalidException(
-                                "Failed to build Ed25519 verifier for kid '" + kid + "'", e);
-                    }
-                }
-                throw new LicenseSignatureInvalidException(
-                        "JWKS entry for kid '" + kid + "' is not an Ed25519 OctetKeyPair");
-            }
-            throw new LicenseKidUnknownException(kid, keyProvider.knownKids());
+    private void checkRevocation(String jti) {
+        // Fail closed: a non-operational checker (e.g. stale/unreachable CRL) rejects everything.
+        if (!revocationChecker.isOperational()) {
+            throw new LicenseRevokedException(jti == null ? "<unknown>" : jti);
         }
-
-        // Custom provider path: only PublicKey is available, reconstruct OctetKeyPair.
-        PublicKey publicKey = keyProvider.findByKid(kid)
-                .orElseThrow(() -> new LicenseKidUnknownException(kid, keyProvider.knownKids()));
-        if (!(publicKey instanceof EdECPublicKey)) {
-            throw new LicenseSignatureInvalidException(
-                    "Public key for kid '" + kid + "' is not an Ed25519 key: " + publicKey.getClass().getName());
-        }
-        try {
-            OctetKeyPair okp = new OctetKeyPair.Builder(Curve.Ed25519, encodeEd25519PublicKey(publicKey))
-                    .build();
-            return new Ed25519Verifier(okp);
-        } catch (Exception e) {
-            throw new LicenseSignatureInvalidException(
-                    "Failed to build Ed25519 verifier for kid '" + kid + "'", e);
+        if (jti != null && revocationChecker.isRevoked(jti)) {
+            throw new LicenseRevokedException(jti);
         }
     }
 
-    private static Base64URL encodeEd25519PublicKey(PublicKey publicKey) {
-        // JDK X.509 SubjectPublicKeyInfo for Ed25519 is always 44 bytes:
-        //   12-byte ASN.1 header { 30 2A 30 05 06 03 2B 65 70 03 21 00 } || 32 raw key bytes
-        // The final 32 bytes are the raw Ed25519 public key per RFC 8032.
-        byte[] encoded = publicKey.getEncoded();
-        if (encoded == null || encoded.length < 32) {
-            throw new LicenseSignatureInvalidException(
-                    "Ed25519 public key encoding is too short: " + (encoded == null ? 0 : encoded.length));
-        }
-        byte[] raw = Arrays.copyOfRange(encoded, encoded.length - 32, encoded.length);
-        return Base64URL.encode(raw);
+    private JWSVerifier resolveVerifier(String kid) {
+        return Ed25519Verifiers.resolve(keyProvider, kid);
     }
 
     private void validateTemporalClaims(JWTClaimsSet claims) {
         Instant now = Instant.now(clock);
         Date exp = claims.getExpirationTime();
-        if (exp != null) {
-            Instant expInstant = exp.toInstant();
-            if (now.isAfter(expInstant.plus(clockSkew))) {
-                throw new LicenseExpiredException(
-                        "License expired at " + expInstant, expInstant);
-            }
+        if (exp == null) {
+            // Mandatory exp: a license without an expiration is rejected outright.
+            throw new LicenseExpiredException("License is missing a mandatory exp claim", null);
+        }
+        Instant expInstant = exp.toInstant();
+        if (now.isAfter(expInstant.plus(clockSkew))) {
+            throw new LicenseExpiredException(
+                    "License expired at " + expInstant, expInstant);
         }
         Date nbf = claims.getNotBeforeTime();
         if (nbf != null) {
@@ -313,6 +273,7 @@ public final class LicenseVerifier {
         private String issuer;
         private Duration clockSkew;
         private Clock clock;
+        private RevocationChecker revocationChecker;
 
         private Builder() {
         }
@@ -368,6 +329,11 @@ public final class LicenseVerifier {
 
         public Builder clock(Clock clock) {
             this.clock = Objects.requireNonNull(clock, "clock");
+            return this;
+        }
+
+        public Builder revocationChecker(RevocationChecker rc) {
+            this.revocationChecker = Objects.requireNonNull(rc, "revocationChecker");
             return this;
         }
 

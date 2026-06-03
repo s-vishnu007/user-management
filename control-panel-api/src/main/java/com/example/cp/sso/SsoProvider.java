@@ -46,6 +46,21 @@ public class SsoProvider {
     @Column(name = "enabled", nullable = false)
     private boolean enabled;
 
+    /**
+     * AES-GCM blob (from KeyEncryptor) of the OIDC client secret. Nullable; the plaintext
+     * secret is stripped from {@link #configJson} by SsoService at persist time and is never
+     * returned in DTOs.
+     */
+    @Column(name = "client_secret_enc")
+    private byte[] clientSecretEnc;
+
+    /**
+     * CSV of verified email domains the org will accept for SSO JIT provisioning. A null/blank
+     * value means NO domains are allowed (deny JIT by default for safety).
+     */
+    @Column(name = "allowed_email_domains")
+    private String allowedEmailDomains;
+
     @Column(name = "created_at", nullable = false)
     private OffsetDateTime createdAt;
 }

@@ -6,6 +6,7 @@ import com.example.licenseverifier.exceptions.LicenseFileMalformedException;
 import com.example.licenseverifier.exceptions.LicenseIssuerMismatchException;
 import com.example.licenseverifier.exceptions.LicenseKidUnknownException;
 import com.example.licenseverifier.exceptions.LicenseNotYetValidException;
+import com.example.licenseverifier.exceptions.LicenseRevokedException;
 import com.example.licenseverifier.exceptions.LicenseSignatureInvalidException;
 import com.nimbusds.jose.JOSEException;
 import com.nimbusds.jose.JOSEObjectType;

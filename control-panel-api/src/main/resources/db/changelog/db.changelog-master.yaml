@@ -26,4 +26,14 @@ databaseChangeLog:
   - include:
       file: db/changelog/changes/12-additional-permissions.sql
   - include:
+      file: db/changelog/changes/13-session-revocation.sql
+  - include:
+      file: db/changelog/changes/13-rbac-permissions.sql
+  - include:
+      file: db/changelog/changes/13-usage-integrity.sql
+  - include:
+      file: db/changelog/changes/13-sso-hardening.sql
+  - include:
+      file: db/changelog/changes/13-audit-outcome.sql
+  - include:
       file: db/changelog/changes/99-auth-password-reset.sql

@@ -11,10 +11,24 @@ public record AuthenticatedUser(
         String email,
         boolean superAdmin,
         Set<String> authorities,
-        Collection<? extends GrantedAuthority> grantedAuthorities
+        Collection<? extends GrantedAuthority> grantedAuthorities,
+        boolean apiKey,
+        UUID apiKeyOrgId
 ) {
+
+    /**
+     * Backward-compatible 5-arg ctor for human-user principals (apiKey=false, apiKeyOrgId=null).
+     */
+    public AuthenticatedUser(UUID userId, String email, boolean superAdmin,
+                             Set<String> authorities, Collection<? extends GrantedAuthority> grantedAuthorities) {
+        this(userId, email, superAdmin, authorities, grantedAuthorities, false, null);
+    }
 
     public boolean hasAuthority(String code) {
         return superAdmin || (authorities != null && authorities.contains(code));
+    }
+
+    public boolean isApiKey() {
+        return apiKey;
     }
 }

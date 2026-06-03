@@ -17,15 +17,26 @@ spring:
   data:
     redis:
       url: ${REDIS_URL:redis://localhost:6379}
+  servlet:
+    multipart:
+      max-file-size: 1MB
+      max-request-size: 1MB
 
 server:
   port: 8080
+  max-http-request-header-size: 16KB
+  tomcat:
+    max-http-form-post-size: 256KB
+    max-swallow-size: 256KB
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,prometheus
+        include: health,info,metrics,prometheus   # but non-health endpoints are secured via SecurityConfig
+  endpoint:
+    health:
+      show-details: never
 
 springdoc:
   swagger-ui:
@@ -34,12 +45,41 @@ springdoc:
 app:
   auth:
     session-secret: ${APP_AUTH_SESSION_SECRET:}
-    session-ttl: PT12H
+    session-ttl: PT30M
+    revocation:
+      enabled: true
+    # Prod default MUST stay false; only application-dev.yml flips this to true.
+    expose-reset-token: ${APP_AUTH_EXPOSE_RESET_TOKEN:false}
+  cors:
+    allowed-origins: ${APP_CORS_ALLOWED_ORIGINS:http://localhost:5173}
+  ratelimit:
+    auth:
+      capacity: ${APP_RATELIMIT_AUTH_CAPACITY:10}
+      refill-per-minute: ${APP_RATELIMIT_AUTH_REFILL:10}
   signing:
     # AES master key (base64) used to encrypt signing private keys at rest — required, no default
     master-key: ${APP_KEY_ENC_MASTER:}
     issuer: ${APP_ISSUER:https://control-panel.example.com}
     default-audience: ${APP_DEFAULT_AUDIENCE:docker-app-prod}
+    crl-ttl: ${APP_CRL_TTL:PT1H}
+  usage:
+    occurred-at-max-past: P35D
+    occurred-at-max-future: PT5M
+    enforce-limit: true
+  audit:
+    # CIDR blocks whose X-Forwarded-For header is trusted; empty => never trust XFF.
+    trusted-proxies: ${APP_AUDIT_TRUSTED_PROXIES:}
+    fail-closed-actions:
+      - license.issued
+      - license.revoked
+      - key.rotated
+      - rbac.role.assigned
+      - rbac.role.removed
+      - org.owner.transferred
+      - apikey.created
+      - apikey.revoked
+      - sso.provider.created
+      - sso.provider.deleted
   licenses:
     default-ttl-days: 365
   sso:

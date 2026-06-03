@@ -46,6 +46,10 @@ public class User {
     @Column(name = "super_admin", nullable = false)
     private boolean superAdmin;
 
+    @Column(name = "token_version", nullable = false)
+    @Builder.Default
+    private long tokenVersion = 0L;
+
     @Column(name = "created_at", nullable = false)
     private OffsetDateTime createdAt;
 
