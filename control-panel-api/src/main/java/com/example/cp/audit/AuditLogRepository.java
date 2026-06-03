@@ -13,15 +13,23 @@ import java.util.UUID;
 @Repository
 public interface AuditLogRepository extends JpaRepository<AuditLog, UUID> {
 
-    @Query("""
-            SELECT a FROM AuditLog a
-            WHERE (:action IS NULL OR a.action = :action)
-              AND (:actor IS NULL OR a.actorUserId = :actor)
-              AND (:targetType IS NULL OR a.targetType = :targetType)
-              AND (:targetId IS NULL OR a.targetId = :targetId)
-              AND (:from IS NULL OR a.occurredAt >= :from)
-              AND (:to IS NULL OR a.occurredAt < :to)
-            """)
+    // Native queries with explicit casts on the optional filters: in JPQL a bare nullable parameter
+    // used as `:p IS NULL` gives Postgres no type to infer ("could not determine data type of
+    // parameter"). ORDER BY is fixed here (occurred_at DESC), so callers MUST pass an UNSORTED
+    // Pageable (a native query cannot translate a Sort on the entity property name to a column, and a
+    // Pageable Sort would also append a second ORDER BY).
+    String SEARCH_FILTER = """
+              (CAST(:action AS text) IS NULL OR action = :action)
+              AND (CAST(:actor AS uuid) IS NULL OR actor_user_id = :actor)
+              AND (CAST(:targetType AS text) IS NULL OR target_type = :targetType)
+              AND (CAST(:targetId AS text) IS NULL OR target_id = :targetId)
+              AND (CAST(:from AS timestamptz) IS NULL OR occurred_at >= :from)
+              AND (CAST(:to AS timestamptz) IS NULL OR occurred_at < :to)
+            """;
+
+    @Query(value = "SELECT * FROM audit_log WHERE " + SEARCH_FILTER + " ORDER BY occurred_at DESC",
+            countQuery = "SELECT count(*) FROM audit_log WHERE " + SEARCH_FILTER,
+            nativeQuery = true)
     Page<AuditLog> search(@Param("action") String action,
                           @Param("actor") UUID actor,
                           @Param("targetType") String targetType,
@@ -30,16 +38,10 @@ public interface AuditLogRepository extends JpaRepository<AuditLog, UUID> {
                           @Param("to") OffsetDateTime to,
                           Pageable pageable);
 
-    @Query("""
-            SELECT a FROM AuditLog a
-            WHERE a.actorOrgId = :orgId
-              AND (:action IS NULL OR a.action = :action)
-              AND (:actor IS NULL OR a.actorUserId = :actor)
-              AND (:targetType IS NULL OR a.targetType = :targetType)
-              AND (:targetId IS NULL OR a.targetId = :targetId)
-              AND (:from IS NULL OR a.occurredAt >= :from)
-              AND (:to IS NULL OR a.occurredAt < :to)
-            """)
+    @Query(value = "SELECT * FROM audit_log WHERE actor_org_id = :orgId AND " + SEARCH_FILTER
+                    + " ORDER BY occurred_at DESC",
+            countQuery = "SELECT count(*) FROM audit_log WHERE actor_org_id = :orgId AND " + SEARCH_FILTER,
+            nativeQuery = true)
     Page<AuditLog> searchForOrg(@Param("orgId") UUID orgId,
                                 @Param("action") String action,
                                 @Param("actor") UUID actor,

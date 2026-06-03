@@ -1,25 +1,33 @@
 openapi: 3.1.0
 info:
   title: User Management Control Panel API
-  version: 0.1.0
+  version: 0.2.0
   description: |
     Control-plane API for the user-management + licensing system.
 
-    Covers admin authentication, organization/user/RBAC management, plan & subscription
-    administration, license JWKS publication, key rotation, usage ingestion, audit log
-    access, SSO configuration, API key management, and the domain event stream.
+    Covers admin authentication (incl. TOTP MFA), organization/user/RBAC management, plan &
+    subscription administration, full license lifecycle (issue / download / read / revoke / CRL /
+    heartbeat), signing-key rotation & JWKS publication, usage ingestion, audit log access, SSO
+    configuration, API key management, GDPR/CCPA privacy (export & erasure), outbound webhooks,
+    and the domain event stream.
 
     Two authentication schemes are supported:
-      - **bearerAuth**: short-lived admin session JWT, issued by `POST /api/v1/auth/login`.
+      - **bearerAuth**: short-lived admin session JWT, issued by `POST /api/v1/auth/login`
+        (or `POST /api/v1/auth/mfa/login` when the account has MFA enabled).
       - **apiKeyAuth**: long-lived programmatic key, sent as `Authorization: ApiKey <token>`.
 
-    The public `/.well-known/jwks.json` endpoint is unauthenticated.
+    Authorization is tenant-scoped: org-scoped resources resolve the target resource's owning org
+    and require either super-admin, an api-key bound to that org, or org membership/role — a global
+    authority alone never grants cross-tenant access.
+
+    The public endpoints `/.well-known/jwks.json`, `GET /api/v1/licenses/crl`, and
+    `GET /api/v1/licenses/revoked` are unauthenticated so offline verifiers can fetch key material
+    and the revocation list without credentials.
+
+    Mutating endpoints accept an optional `Idempotency-Key` request header: a retry carrying the same
+    key (and identical body) replays the original response instead of re-executing the side effect.
 
     Error responses follow [RFC 7807 Problem Details](https://datatracker.ietf.org/doc/html/rfc7807).
-
-    > **Caveat:** the license-issuance endpoint (`POST .../licenses`) referenced in the
-    > implementation plan is *not yet wired up* in `control-panel-api`. It is documented
-    > here as the intended contract for Phase 1 closure.
   contact:
     name: Control Panel Team
     email: support@control-panel.example.com
@@ -48,7 +56,7 @@ tags:
   - name: subscriptions
     description: Org subscriptions, status transitions, and overrides.
   - name: licenses
-    description: License issuance & revocation (planned).
+    description: License issue, download, read, revoke, signed CRL, and seat/node heartbeat.
   - name: keys
     description: Signing key generation and rotation.
   - name: jwks
@@ -61,6 +69,10 @@ tags:
     description: Per-org SAML / OIDC configuration.
   - name: apikeys
     description: Programmatic API key administration.
+  - name: privacy
+    description: GDPR/CCPA data-subject export and right-to-erasure.
+  - name: webhooks
+    description: Per-org outbound webhook subscriptions (signed, retried) and delivery status.
   - name: events
     description: Outbox-derived domain event stream.
 
@@ -76,7 +88,12 @@ paths:
   /api/v1/auth/login:
     post:
       tags: [auth]
-      summary: Exchange email + password for an admin session JWT.
+      summary: Exchange email + password for an admin session JWT (or an MFA challenge).
+      description: |
+        On success for a non-MFA account, returns the session token (`mfaRequired=false`).
+        When the account has TOTP MFA enabled, the password alone yields only a short-lived
+        `mfaChallenge` (`mfaRequired=true`) and **no** `accessToken`; the client must then call
+        `POST /api/v1/auth/mfa/login` with the challenge and a current TOTP code.
       security: []
       requestBody:
         required: true
@@ -86,13 +103,81 @@ paths:
               $ref: '#/components/schemas/LoginRequest'
       responses:
         '200':
-          description: Login successful.
+          description: Login successful, or an MFA challenge issued.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/LoginResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/mfa/login:
+    post:
+      tags: [auth]
+      summary: Complete a two-step login by verifying a TOTP code against the MFA challenge.
+      description: |
+        Step 2 of MFA login. Supply the `challenge` from `POST /api/v1/auth/login` (or, as a
+        fallback, the `email`) plus a current TOTP `code`. Public, since the caller has no session
+        yet — the bearer of a valid challenge + correct code is the authenticated user.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MfaLoginRequest'
+      responses:
+        '200':
+          description: MFA verified; full session issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/mfa/enroll:
+    post:
+      tags: [auth]
+      summary: Begin TOTP MFA enrollment for the current user.
+      description: |
+        Returns the base32 `secret` and an `otpauth://` URI to load into an authenticator app.
+        The secret is shown ONCE; MFA is not active until a code is confirmed via `/auth/mfa/verify`.
+      responses:
+        '200':
+          description: Enrollment started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaEnrollResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/mfa/verify:
+    post:
+      tags: [auth]
+      summary: Confirm MFA enrollment by verifying a TOTP code.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MfaCodeRequest'
+      responses:
+        '204':
+          description: MFA enabled for the user.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/auth/mfa/disable:
+    post:
+      tags: [auth]
+      summary: Disable MFA for the current user (idempotent).
+      responses:
+        '204':
+          description: MFA disabled.
 
   /api/v1/auth/logout:
     post:
@@ -308,10 +393,24 @@ paths:
       - $ref: '#/components/parameters/UserIdParam'
     post:
       tags: [users]
-      summary: Deactivate a user.
+      summary: Deactivate (suspend) a user. Requires `user.write`.
       responses:
         '204':
           description: Deactivated.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/users/{userId}/delete:
+    parameters:
+      - $ref: '#/components/parameters/UserIdParam'
+    post:
+      tags: [users]
+      summary: Soft-delete a user. Requires `user.write`. Bumps token version (revokes sessions).
+      responses:
+        '204':
+          description: Deleted.
+        '403':
+          $ref: '#/components/responses/Forbidden'
 
   /api/v1/users/{userId}/change-password:
     parameters:
@@ -672,52 +771,73 @@ paths:
           description: Removed.
 
   # ============================================================
-  # licenses (PLANNED — see info note)
+  # licenses
   # ============================================================
-  /api/v1/subscriptions/{subscriptionId}/licenses:
+  /api/v1/subscriptions/{subId}/licenses:
     parameters:
-      - $ref: '#/components/parameters/SubscriptionIdParam'
-    get:
-      tags: [licenses]
-      summary: '[Planned] List licenses issued for a subscription.'
-      responses:
-        '200':
-          description: OK.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/LicenseToken'
+      - in: path
+        name: subId
+        required: true
+        schema: { type: string, format: uuid }
     post:
       tags: [licenses]
-      summary: '[Planned] Issue a new license for the subscription.'
+      summary: Issue a new license for the subscription.
+      description: |
+        Signs a fresh Ed25519 license JWT bound to the subscription. The response carries the
+        compact JWT (`license`) plus a `downloadUrl` for the `.lic` envelope. Authorized via the
+        subscription's owning org (`@tenantAccess.canIssueLicenseForSubscription`).
       requestBody:
-        required: true
+        required: false
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/LicenseIssueRequest'
       responses:
         '201':
-          description: "License issued. Set `Accept: application/vnd.example.license+json` to receive only the `.lic` envelope for direct download."
+          description: License issued.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/LicenseIssueResponse'
-            application/vnd.example.license+json:
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/licenses:
+    get:
+      tags: [licenses]
+      summary: List licenses issued for a subscription.
+      description: |
+        `subscriptionId` is REQUIRED — an unscoped, cross-org enumeration is a tenant leak. The
+        caller is authorized against the subscription's owning org.
+      parameters:
+        - in: query
+          name: subscriptionId
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+            enum: [ACTIVE, REVOKED, EXPIRED]
+      responses:
+        '200':
+          description: OK (newest first).
+          content:
+            application/json:
               schema:
-                $ref: '#/components/schemas/LicenseEnvelope'
+                type: array
+                items:
+                  $ref: '#/components/schemas/LicenseToken'
+        '403':
+          $ref: '#/components/responses/Forbidden'
 
   /api/v1/licenses/{jti}:
     parameters:
-      - in: path
-        name: jti
-        required: true
-        schema: { type: string }
+      - $ref: '#/components/parameters/JtiParam'
     get:
       tags: [licenses]
-      summary: '[Planned] Get a license record by jti.'
+      summary: Get a license record by jti.
       responses:
         '200':
           description: OK.
@@ -725,38 +845,115 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/LicenseToken'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/licenses/{jti}/download:
+    parameters:
+      - $ref: '#/components/parameters/JtiParam'
+    get:
+      tags: [licenses]
+      summary: Download the signed `.lic` envelope for a license.
+      description: |
+        Returns the `.lic` envelope as a JSON attachment (`Content-Disposition: attachment`).
+        Revoked licenses return 400. On an issuance-cache miss the server re-issues an equivalent
+        license bound to the same subscription so the caller still receives a valid envelope.
+      responses:
+        '200':
+          description: The `.lic` envelope.
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+              description: 'attachment; filename="...".lic'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LicenseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /api/v1/licenses/{jti}/revoke:
     parameters:
-      - in: path
-        name: jti
-        required: true
-        schema: { type: string }
+      - $ref: '#/components/parameters/JtiParam'
     post:
       tags: [licenses]
-      summary: '[Planned] Revoke a license.'
+      summary: Revoke a license.
+      description: Marks the license REVOKED so it appears in the CRL. Authorized via the license's owning org.
       requestBody:
-        required: true
+        required: false
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/ReasonRequest'
       responses:
-        '200':
+        '204':
           description: Revoked.
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/licenses/{jti}/heartbeat:
+    parameters:
+      - $ref: '#/components/parameters/JtiParam'
+    post:
+      tags: [licenses]
+      summary: Phone-home / lease heartbeat from a licensed node.
+      description: |
+        Records a seat/node activation for the license: upserts the `(jti, node_id)` activation row
+        and stamps `last_seen_at`/`last_seen_ip`. Active seats are counted from activations seen
+        within `app.licensing.lease-window`. The licensed app authenticates with an API key (or a
+        valid license bearer token) bound to the license's owning org.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeartbeatRequest'
+      responses:
+        '200':
+          description: Heartbeat recorded.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/LicenseToken'
+                $ref: '#/components/schemas/HeartbeatResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/licenses/crl:
+    get:
+      tags: [licenses]
+      summary: Signed certificate-revocation list (compact JWS, typ=crl+jwt).
+      description: |
+        Public. Returns a compact JWS signed with the active Ed25519 key (verifiable against
+        `/.well-known/jwks.json`) whose claims carry `{iss, iat, nextUpdate, revoked:[jti...]}`.
+        `nextUpdate` is `now + app.signing.crl-ttl`. Consumed by offline verifiers to fail-close
+        revoked licenses.
+      security: []
+      responses:
+        '200':
+          description: Signed CRL.
+          content:
+            application/jwt:
+              schema:
+                type: string
+                description: Compact JWS (header `kid`+`typ=crl+jwt`).
 
   /api/v1/licenses/revoked:
     get:
       tags: [licenses]
-      summary: '[Planned] CRL — list jtis revoked since a given timestamp.'
+      summary: Legacy JSON revocation list — jtis revoked (optionally since a timestamp).
+      security: []
       parameters:
         - in: query
           name: since
-          required: true
+          required: false
           schema:
             type: string
             format: date-time
@@ -1007,13 +1204,20 @@ paths:
         name: orgSlug
         required: true
         schema: { type: string }
+      - in: query
+        name: provider
+        required: false
+        schema: { type: string }
+        description: Select a specific provider by id or type (OIDC/SAML); defaults to the org's first enabled provider.
     get:
       tags: [sso]
       summary: Begin an SSO login flow for an org.
       security: []
       responses:
         '302':
-          description: Redirect to the IdP.
+          description: Redirect to the IdP authorization endpoint.
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -1061,10 +1265,174 @@ paths:
         schema: { type: string, format: uuid }
     delete:
       tags: [apikeys]
-      summary: Revoke an API key.
+      summary: Revoke an API key. Scoped to the path org (404 if the key is not in this org).
       responses:
         '204':
           description: Revoked.
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================================
+  # privacy (GDPR/CCPA)
+  # ============================================================
+  /api/v1/privacy/users/{userId}/export:
+    parameters:
+      - $ref: '#/components/parameters/UserIdParam'
+    get:
+      tags: [privacy]
+      summary: Export all personal data held for a user (right of access / data portability).
+      description: |
+        Returns a machine-readable bundle of the subject's profile, memberships, role assignments,
+        and related operational records. Authorized for the subject themselves, an org admin over
+        the subject, or a super-admin. The request is recorded in the erasure_log ledger.
+      responses:
+        '200':
+          description: Data-subject export bundle.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataExport'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/privacy/users/{userId}/erase:
+    parameters:
+      - $ref: '#/components/parameters/UserIdParam'
+    post:
+      tags: [privacy]
+      summary: Erase / pseudonymise a user's personal data (right to erasure).
+      description: |
+        Pseudonymises PII in place via the existing repositories (the immutable audit log is
+        preserved but no longer resolves to the natural person), bumps the user's token version to
+        revoke sessions, and records the request in the erasure_log ledger. Authorized for a
+        super-admin or an org admin over the subject.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReasonRequest'
+      responses:
+        '200':
+          description: Erasure completed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErasureRecord'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/privacy/orgs/{orgId}/erase:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+    post:
+      tags: [privacy]
+      summary: Off-board a tenant — erase / pseudonymise an organization's data.
+      description: Tenant off-boarding. Authorized for a super-admin. Recorded in the erasure_log ledger.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReasonRequest'
+      responses:
+        '200':
+          description: Off-boarding completed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErasureRecord'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================================
+  # webhooks
+  # ============================================================
+  /api/v1/orgs/{orgId}/webhooks:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+    get:
+      tags: [webhooks]
+      summary: List webhook subscriptions for an org.
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WebhookSubscription'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [webhooks]
+      summary: Register an outbound webhook endpoint for an org.
+      description: |
+        Registers an HTTPS endpoint and an HMAC signing secret (stored encrypted at rest). Matching
+        domain events are delivered as signed POSTs with capped exponential-backoff retries up to
+        `app.webhooks.max-attempts`. The plaintext `secret` is returned ONCE at creation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookSubscriptionCreate'
+      responses:
+        '201':
+          description: Created. Save the `secret` — it is shown only here.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSubscriptionCreateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/orgs/{orgId}/webhooks/{webhookId}:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+      - in: path
+        name: webhookId
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [webhooks]
+      summary: Delete a webhook subscription.
+      responses:
+        '204':
+          description: Deleted.
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/orgs/{orgId}/webhooks/{webhookId}/deliveries:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+      - in: path
+        name: webhookId
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [webhooks]
+      summary: List recent delivery attempts for a webhook subscription.
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WebhookDelivery'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   # ============================================================
   # events
@@ -1121,6 +1489,21 @@ components:
       name: subscriptionId
       required: true
       schema: { type: string, format: uuid }
+    JtiParam:
+      in: path
+      name: jti
+      required: true
+      schema: { type: string }
+      description: License JWT id (jti claim).
+    IdempotencyKeyHeader:
+      in: header
+      name: Idempotency-Key
+      required: false
+      schema: { type: string, maxLength: 255 }
+      description: |
+        Optional on mutating endpoints. A retry carrying the same key, method, path, actor, and
+        request body replays the original response instead of re-executing the side effect. Stored
+        for `app.idempotency.ttl`.
     PageParam:
       in: query
       name: page
@@ -1207,11 +1590,43 @@ components:
 
     LoginResponse:
       type: object
-      required: [accessToken, expiresAt, user]
+      description: |
+        Unified login result. For a non-MFA account (or a completed step-2 MFA login) it carries the
+        full session (`accessToken`, `expiresAt`, `user`) with `mfaRequired=false`. For an MFA-enabled
+        account, step 1 returns `mfaRequired=true` with a short-lived `mfaChallenge` and NO session
+        token; the client must call `POST /api/v1/auth/mfa/login` to obtain a session. Null fields are
+        omitted from the response.
+      required: [mfaRequired]
       properties:
-        accessToken: { type: string, description: 'Session JWT.' }
-        expiresAt: { type: string, format: date-time }
-        user: { $ref: '#/components/schemas/User' }
+        accessToken: { type: string, nullable: true, description: 'Session JWT (absent for an MFA challenge).' }
+        expiresAt: { type: string, format: date-time, nullable: true }
+        user:
+          allOf: [ { $ref: '#/components/schemas/User' } ]
+          nullable: true
+        mfaRequired: { type: boolean }
+        mfaChallenge: { type: string, nullable: true, description: 'Short-lived challenge for step-2 MFA login.' }
+        mfaChallengeExpiresAt: { type: string, format: date-time, nullable: true }
+
+    MfaLoginRequest:
+      type: object
+      required: [code]
+      properties:
+        challenge: { type: string, description: 'The challenge from POST /auth/login.' }
+        email: { type: string, format: email, description: 'Fallback subject resolution when no challenge is supplied.' }
+        code: { type: string, description: 'Current TOTP code.' }
+
+    MfaEnrollResponse:
+      type: object
+      required: [secret, otpAuthUri]
+      properties:
+        secret: { type: string, description: 'Base32 TOTP secret (shown once).' }
+        otpAuthUri: { type: string, description: 'otpauth:// URI for authenticator apps.' }
+
+    MfaCodeRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string }
 
     PasswordResetRequest:
       type: object
@@ -1505,23 +1920,16 @@ components:
             - type: 'null'
 
     # ---- licenses ----
+    # The license record as returned by the API (plan/permissions/features/seats live inside the
+    # signed JWT, not in this DTO).
     LicenseToken:
       type: object
       properties:
+        id: { type: string, format: uuid }
         jti: { type: string }
         subscriptionId: { type: string, format: uuid }
-        orgId: { type: string, format: uuid }
         kid: { type: string }
-        plan: { type: string }
-        permissions:
-          type: array
-          items: { type: string }
-        features:
-          type: object
-          additionalProperties: true
-        seats: { type: integer }
         issuedAt: { type: string, format: date-time }
-        notBefore: { type: string, format: date-time }
         expiresAt: { type: string, format: date-time }
         revokedAt: { type: string, format: date-time, nullable: true }
         revokeReason: { type: string, nullable: true }
@@ -1535,26 +1943,53 @@ components:
 
     LicenseIssueRequest:
       type: object
+      description: All fields optional; omit the body to use the plan/subscription defaults.
       properties:
-        audience:
-          type: string
-          description: Target audience claim. Defaults to the subscription's configured audience.
         ttlDays:
           type: integer
-          description: Override the plan's default TTL.
-        notBefore: { type: string, format: date-time, nullable: true }
+          description: Override the plan's default TTL (days).
+        audience:
+          type: array
+          items: { type: string }
+          description: Target audience claim(s). Defaults to the configured default audience.
         notes: { type: string }
-        kid:
-          type: string
-          description: Force signing with a specific key. Defaults to the active key.
 
     LicenseIssueResponse:
       type: object
-      required: [token, envelope]
+      required: [jti, kid, issuedAt, expiresAt, license, downloadUrl]
       properties:
-        token: { $ref: '#/components/schemas/LicenseToken' }
-        envelope: { $ref: '#/components/schemas/LicenseEnvelope' }
-        downloadFilename: { type: string, example: 'acme-corp-pro-2026-06-01.lic' }
+        jti: { type: string }
+        kid: { type: string }
+        issuedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        license:
+          type: string
+          description: The compact-serialized signed license JWT (save directly, or fetch the .lic envelope via downloadUrl).
+        downloadUrl:
+          type: string
+          example: '/api/v1/licenses/<jti>/download'
+
+    HeartbeatRequest:
+      type: object
+      required: [nodeId]
+      properties:
+        nodeId:
+          type: string
+          maxLength: 190
+          description: The licensed app's self-reported node identifier (host id / instance id).
+
+    HeartbeatResponse:
+      type: object
+      properties:
+        jti: { type: string }
+        nodeId: { type: string }
+        activeSeats:
+          type: integer
+          description: Distinct nodes seen within app.licensing.lease-window.
+        seats:
+          type: integer
+          description: Licensed seat cap (0 = uncapped).
+        lastSeenAt: { type: string, format: date-time }
 
     LicenseEnvelope:
       type: object
@@ -1570,9 +2005,9 @@ components:
     RevocationList:
       type: object
       properties:
+        revokedSince: { type: string, format: date-time, nullable: true, description: 'Echoes the `since` query param (null if omitted).' }
         generatedAt: { type: string, format: date-time }
-        since: { type: string, format: date-time }
-        entries:
+        items:
           type: array
           items:
             type: object
@@ -1580,8 +2015,8 @@ components:
             properties:
               jti: { type: string }
               revokedAt: { type: string, format: date-time }
-              reason: { type: string }
-      required: [generatedAt, since, entries]
+              reason: { type: string, nullable: true }
+      required: [generatedAt, items]
 
     # ---- keys / jwks ----
     SigningKey:
@@ -1680,6 +2115,10 @@ components:
         payloadJson: { type: string }
         ipAddress: { type: string, nullable: true }
         occurredAt: { type: string, format: date-time }
+        outcome:
+          type: string
+          enum: [SUCCESS, DENIED, FAILED]
+          description: Whether the audited action succeeded, was denied, or failed.
       required: [id, action, occurredAt]
 
     AuditEntryPage:
@@ -1780,3 +2219,98 @@ components:
         occurredAt: { type: string, format: date-time }
         publishedAt: { type: string, format: date-time, nullable: true }
       required: [id, aggregateType, eventType, occurredAt]
+
+    # ---- privacy ----
+    DataExport:
+      type: object
+      description: |
+        Machine-readable bundle of all personal data held for a data subject (right of access /
+        data portability). The concrete sub-objects mirror the subject's profile and related records.
+      properties:
+        subjectType:
+          type: string
+          enum: [user, org]
+        subjectId: { type: string, format: uuid }
+        generatedAt: { type: string, format: date-time }
+        data:
+          type: object
+          additionalProperties: true
+          description: The exported personal data (profile, memberships, role assignments, etc.).
+      required: [subjectType, subjectId, generatedAt, data]
+
+    ErasureRecord:
+      type: object
+      description: A row from the erasure_log ledger evidencing a completed DSAR/erasure operation.
+      properties:
+        id: { type: string, format: uuid }
+        subjectType:
+          type: string
+          enum: [user, org]
+        subjectId: { type: string, format: uuid }
+        action:
+          type: string
+          enum: [export, erase]
+        requestedBy: { type: string, format: uuid, nullable: true }
+        requestedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time, nullable: true }
+      required: [id, subjectType, subjectId, action, requestedAt]
+
+    # ---- webhooks ----
+    WebhookSubscription:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        url: { type: string, format: uri, description: 'HTTPS endpoint that receives signed event POSTs.' }
+        eventTypes:
+          type: string
+          nullable: true
+          description: 'CSV of event types to deliver; null = all events.'
+        active: { type: boolean }
+        createdAt: { type: string, format: date-time }
+      required: [id, orgId, url, active, createdAt]
+
+    WebhookSubscriptionCreate:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, format: uri, description: 'Must be HTTPS.' }
+        eventTypes:
+          type: array
+          items: { type: string }
+          description: Event types to deliver; omit/empty to receive all events.
+        active: { type: boolean, default: true }
+
+    WebhookSubscriptionCreateResponse:
+      type: object
+      required: [id, orgId, url, secret, active, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        url: { type: string, format: uri }
+        secret:
+          type: string
+          description: |
+            HMAC signing secret. Shown ONLY at creation; the server stores only an encrypted copy.
+            Use it to verify the signature header on delivered webhook POSTs.
+        eventTypes: { type: string, nullable: true }
+        active: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    WebhookDelivery:
+      type: object
+      description: One delivery attempt record per (subscription, event), driving at-least-once delivery.
+      properties:
+        id: { type: string, format: uuid }
+        subscriptionId: { type: string, format: uuid }
+        eventId: { type: string, format: uuid, description: 'The outbox event id being delivered.' }
+        status:
+          type: string
+          enum: [PENDING, DELIVERED, FAILED]
+        attempts: { type: integer }
+        responseStatus: { type: integer, nullable: true }
+        nextAttemptAt: { type: string, format: date-time, nullable: true }
+        lastError: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        deliveredAt: { type: string, format: date-time, nullable: true }
+      required: [id, subscriptionId, eventId, status, attempts, createdAt]

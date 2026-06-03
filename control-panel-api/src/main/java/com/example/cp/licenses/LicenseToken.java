@@ -26,6 +26,9 @@ public class LicenseToken {
 
     public enum Status { ACTIVE, REVOKED, EXPIRED }
 
+    /** Distinguishes a first-class trial license from a standard (paid) one. */
+    public enum LicenseType { STANDARD, TRIAL }
+
     @Id
     @Column(name = "id", nullable = false)
     private UUID id;
@@ -63,4 +66,9 @@ public class LicenseToken {
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false)
     private Status status;
+
+    @Builder.Default
+    @Enumerated(EnumType.STRING)
+    @Column(name = "license_type", nullable = false, length = 20)
+    private LicenseType licenseType = LicenseType.STANDARD;
 }

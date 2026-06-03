@@ -30,17 +30,20 @@ public class LicenseController {
     private final LicenseRevocationService revocationService;
     private final LicenseTokenRepository tokenRepo;
     private final LicenseEnvelopeCache envelopeCache;
+    private final ActivationService activationService;
 
     public LicenseController(LicenseIssuer issuer,
                              LicenseFileBuilder fileBuilder,
                              LicenseRevocationService revocationService,
                              LicenseTokenRepository tokenRepo,
-                             LicenseEnvelopeCache envelopeCache) {
+                             LicenseEnvelopeCache envelopeCache,
+                             ActivationService activationService) {
         this.issuer = issuer;
         this.fileBuilder = fileBuilder;
         this.revocationService = revocationService;
         this.tokenRepo = tokenRepo;
         this.envelopeCache = envelopeCache;
+        this.activationService = activationService;
     }
 
     @PostMapping("/subscriptions/{subId}/licenses")
@@ -49,7 +52,10 @@ public class LicenseController {
                                                      @RequestBody(required = false) IssueRequest body) {
         Integer ttl = body == null ? null : body.ttlDays();
         List<String> audience = body == null ? null : body.audience();
-        LicenseIssuer.IssuedLicense issued = issuer.issue(subId, ttl, audience);
+        boolean trial = body != null && Boolean.TRUE.equals(body.trial());
+        LicenseIssuer.IssuedLicense issued = trial
+                ? issuer.issueTrial(subId, ttl, audience)
+                : issuer.issue(subId, ttl, audience);
         // Cache the raw JWT so /download returns the same artifact within the cache TTL.
         envelopeCache.put(issued.jti(), issued);
 
@@ -122,9 +128,9 @@ public class LicenseController {
     @GetMapping("/licenses/{jti}")
     @PreAuthorize("@tenantAccess.canReadLicenseByJti(#jti)")
     public LicenseDto getOne(@PathVariable String jti) {
-        return LicenseDto.from(
-                tokenRepo.findByJti(jti).orElseThrow(() -> ApiException.notFound("License not found"))
-        );
+        LicenseToken token = tokenRepo.findByJti(jti)
+                .orElseThrow(() -> ApiException.notFound("License not found"));
+        return LicenseDto.from(token, activationService.activeSeatCount(jti));
     }
 
     private static Integer computeRemainingDays(OffsetDateTime expiresAt) {
@@ -133,7 +139,7 @@ public class LicenseController {
         return (int) Math.max(1, days);
     }
 
-    public record IssueRequest(Integer ttlDays, List<String> audience, String notes) {}
+    public record IssueRequest(Integer ttlDays, List<String> audience, String notes, Boolean trial) {}
 
     public record RevokeRequest(String reason) {}
 }

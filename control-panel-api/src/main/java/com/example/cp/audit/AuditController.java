@@ -38,7 +38,7 @@ public class AuditController {
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime to,
             @RequestParam(required = false) Integer page,
             @RequestParam(required = false) Integer size) {
-        Pageable p = withDefaultSort(PageRequestParams.of(page, size, null));
+        Pageable p = PageRequestParams.of(page, size, null); // ORDER BY occurred_at DESC fixed in the native query
         Page<AuditLog> result = repo.search(action, actor, targetType, targetId, from, to, p);
         return PagedResponse.of(result.map(AuditLogDto::from).getContent(), result.getTotalElements(), result.getNumber(), result.getSize());
     }
@@ -56,16 +56,9 @@ public class AuditController {
             @RequestParam(required = false) Integer page,
             @RequestParam(required = false) Integer size) {
         if (orgId == null) throw ApiException.badRequest("orgId required");
-        Pageable p = withDefaultSort(PageRequestParams.of(page, size, null));
+        Pageable p = PageRequestParams.of(page, size, null); // ORDER BY occurred_at DESC fixed in the native query
         Page<AuditLog> result = repo.searchForOrg(orgId, action, actor, targetType, targetId, from, to, p);
         return PagedResponse.of(result.map(AuditLogDto::from).getContent(), result.getTotalElements(), result.getNumber(), result.getSize());
-    }
-
-    private Pageable withDefaultSort(Pageable p) {
-        if (p.getSort().isUnsorted()) {
-            return org.springframework.data.domain.PageRequest.of(p.getPageNumber(), p.getPageSize(), Sort.by(Sort.Direction.DESC, "occurredAt"));
-        }
-        return p;
     }
 
     public record AuditLogDto(

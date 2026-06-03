@@ -12,10 +12,12 @@ import java.util.UUID;
 @Repository
 public interface OutboxEventRepository extends JpaRepository<OutboxEvent, UUID> {
 
-    @Query("""
-            SELECT e FROM OutboxEvent e
-            WHERE (:since IS NULL OR e.occurredAt >= :since)
-            ORDER BY e.occurredAt ASC
-            """)
+    // Native query with an explicit cast: a bare nullable parameter used as `:since IS NULL` in JPQL
+    // gives Postgres no type to infer ("could not determine data type of parameter $1").
+    @Query(value = """
+            SELECT * FROM outbox_events
+            WHERE (CAST(:since AS timestamptz) IS NULL OR occurred_at >= :since)
+            ORDER BY occurred_at ASC
+            """, nativeQuery = true)
     List<OutboxEvent> findSince(@Param("since") OffsetDateTime since);
 }

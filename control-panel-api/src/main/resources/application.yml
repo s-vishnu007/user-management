@@ -121,6 +121,22 @@ app:
       - sso.provider.deleted
   licenses:
     default-ttl-days: 365
+  licensing:
+    # Sliding window over which a license_activations row counts as an "active seat": a node that has
+    # phoned home (heartbeat) within this window is counted toward seat usage; older rows are stale.
+    lease-window: ${APP_LICENSING_LEASE_WINDOW:PT24H}
+    # How far ahead of expiry the lifecycle sweeper emits a license.expiring warning (outbox event).
+    expiry-warning: ${APP_LICENSING_EXPIRY_WARNING:P14D}
+  webhooks:
+    # Maximum delivery attempts per (subscription, event) before a webhook_deliveries row is parked in
+    # the terminal FAILED state (capped exponential backoff between attempts).
+    max-attempts: ${APP_WEBHOOKS_MAX_ATTEMPTS:8}
+    # Per-attempt connect+read timeout for the outbound HTTPS POST (java.net.http HttpClient).
+    timeout: ${APP_WEBHOOKS_TIMEOUT:PT10S}
+  idempotency:
+    # Time-to-live for stored Idempotency-Key records; retries within this window replay the original
+    # response, after which the key is eligible for the cleanup sweep and may be reused.
+    ttl: ${APP_IDEMPOTENCY_TTL:P1D}
   sso:
     enabled: ${APP_SSO_ENABLED:true}
     base-url: ${APP_SSO_BASE_URL:http://localhost:8080}

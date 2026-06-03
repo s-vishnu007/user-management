@@ -8,6 +8,7 @@ import com.example.cp.keys.KeyService;
 import com.example.cp.subscriptions.OutboxPublisher;
 import com.example.cp.subscriptions.Subscription;
 import com.example.cp.subscriptions.SubscriptionService;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -27,23 +28,43 @@ public class LicenseIssuer {
     private final LicenseTokenRepository tokenRepo;
     private final SubscriptionService subService;
     private final OutboxPublisher outbox;
+    private final int trialTtlDays;
 
     public LicenseIssuer(KeyService keyService,
                          JwsSigner jwsSigner,
                          LicenseClaimsBuilder claimsBuilder,
                          LicenseTokenRepository tokenRepo,
                          SubscriptionService subService,
-                         OutboxPublisher outbox) {
+                         OutboxPublisher outbox,
+                         @Value("${app.licensing.trial-ttl-days:14}") int trialTtlDays) {
         this.keyService = keyService;
         this.jwsSigner = jwsSigner;
         this.claimsBuilder = claimsBuilder;
         this.tokenRepo = tokenRepo;
         this.subService = subService;
         this.outbox = outbox;
+        this.trialTtlDays = trialTtlDays;
     }
 
     @Transactional
     public IssuedLicense issue(UUID subscriptionId, Integer ttlDaysOverride, List<String> audienceOverride) {
+        return issue(subscriptionId, ttlDaysOverride, audienceOverride, LicenseToken.LicenseType.STANDARD);
+    }
+
+    /**
+     * Mints a short-lived TRIAL license. The TTL is the explicit override when positive, otherwise
+     * the configured {@code app.licensing.trial-ttl-days} (default 14d), so a trial never inherits
+     * the plan's full default TTL.
+     */
+    @Transactional
+    public IssuedLicense issueTrial(UUID subscriptionId, Integer ttlDaysOverride, List<String> audienceOverride) {
+        int ttl = (ttlDaysOverride != null && ttlDaysOverride > 0) ? ttlDaysOverride : trialTtlDays;
+        return issue(subscriptionId, ttl, audienceOverride, LicenseToken.LicenseType.TRIAL);
+    }
+
+    @Transactional
+    public IssuedLicense issue(UUID subscriptionId, Integer ttlDaysOverride, List<String> audienceOverride,
+                               LicenseToken.LicenseType licenseType) {
         Subscription sub = subService.get(subscriptionId);
         if (sub.getStatus() != Subscription.Status.ACTIVE) {
             throw ApiException.badRequest("Cannot issue license for subscription in status " + sub.getStatus());
@@ -55,6 +76,7 @@ public class LicenseIssuer {
         String jwt = jwsSigner.sign(built.claims(), "license+jwt", active);
         String fingerprint = sha256TruncatedHex(jwt, 32);
 
+        LicenseToken.LicenseType type = licenseType == null ? LicenseToken.LicenseType.STANDARD : licenseType;
         LicenseToken row = LicenseToken.builder()
                 .id(Ids.newId())
                 .jti(built.jti())
@@ -64,6 +86,7 @@ public class LicenseIssuer {
                 .expiresAt(built.expiresAt())
                 .fingerprint(fingerprint)
                 .status(LicenseToken.Status.ACTIVE)
+                .licenseType(type)
                 .build();
         tokenRepo.save(row);
 
@@ -72,6 +95,7 @@ public class LicenseIssuer {
         AuditContext.putPayload("subscription_id", sub.getId().toString());
         AuditContext.putPayload("plan_code", built.planCode());
         AuditContext.putPayload("kid", active.kid());
+        AuditContext.putPayload("license_type", type.name());
 
         outbox.publish("license_token", built.jti(), "LicenseIssued",
                 Map.of(
@@ -81,7 +105,8 @@ public class LicenseIssuer {
                         "plan_code", built.planCode(),
                         "kid", active.kid(),
                         "issued_at", built.issuedAt().toString(),
-                        "expires_at", built.expiresAt().toString()
+                        "expires_at", built.expiresAt().toString(),
+                        "license_type", type.name()
                 )
         );
 
