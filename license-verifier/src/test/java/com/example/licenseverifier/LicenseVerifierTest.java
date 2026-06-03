@@ -122,9 +122,10 @@ class LicenseVerifierTest {
 
         String jwt = signLicense(now, now.plus(Duration.ofDays(365)));
         String[] parts = jwt.split("\\.");
-        // Tamper the last character of the signature
+        // Tamper the FIRST signature char: the last base64url char of a 64-byte Ed25519 signature
+        // only carries padding bits the decoder ignores, so flipping it would be a no-op.
         char[] sig = parts[2].toCharArray();
-        sig[sig.length - 1] = sig[sig.length - 1] == 'A' ? 'B' : 'A';
+        sig[0] = sig[0] == 'A' ? 'B' : 'A';
         String tampered = parts[0] + "." + parts[1] + "." + new String(sig);
 
         LicenseVerifier verifier = buildVerifier(clock);

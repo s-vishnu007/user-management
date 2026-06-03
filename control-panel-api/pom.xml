@@ -117,6 +117,14 @@
             <artifactId>postgresql</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- Test-only: exercise the standalone offline verifier library directly against the
+             running panel's JWKS + signed CRL in cross-module integration tests. -->
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>license-verifier</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

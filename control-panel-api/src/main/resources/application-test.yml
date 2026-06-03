@@ -1,4 +1,9 @@
 spring:
+  # No Redis in the test profile: exclude its auto-config so no RedisConnectionFactory bean exists,
+  # which makes SessionRevocationConfig fall back to the InMemorySessionRevocationStore. This lets
+  # session-revocation integration tests run against just a Testcontainers Postgres (no Redis service).
+  autoconfigure:
+    exclude: org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
   datasource:
     url: ${DB_URL:jdbc:tc:postgresql:16:///cp_test}
     username: ${DB_USER:test}
@@ -12,14 +17,13 @@ spring:
         dialect: org.hibernate.dialect.PostgreSQLDialect
   liquibase:
     change-log: classpath:db/changelog/db.changelog-master.yaml
-  data:
-    redis:
-      url: ${REDIS_URL:redis://localhost:6379}
 
 app:
   auth:
     session-secret: dGVzdC1zZXNzaW9uLXNlY3JldC1mb3ItdGVzdGluZy1vbmx5LXBsZWFzZS1jaGFuZ2U=
-    session-ttl: PT12H
+    session-ttl: PT30M
+    revocation:
+      enabled: true
     expose-reset-token: false
   signing:
     master-key: dGVzdC1tYXN0ZXIta2V5LWZvci10ZXN0aW5nLW9ubHkhIQ==

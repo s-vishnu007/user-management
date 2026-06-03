@@ -87,7 +87,11 @@ public final class CrlVerifier {
             throw new LicenseIssuerMismatchException(expectedIssuer, issuer);
         }
 
-        Instant issuedAt = readEpochSeconds(claims, "iat", false);
+        // Prefer the registered-claim accessors: after SignedJWT.parse(), Nimbus exposes NumericDate
+        // claims as java.util.Date (not Number), so getClaim("iat") would not be a Number.
+        Instant issuedAt = claims.getIssueTime() != null
+                ? claims.getIssueTime().toInstant()
+                : readEpochSeconds(claims, "iat", false);
         Instant nextUpdate = readEpochSeconds(claims, "nextUpdate", true);
 
         List<String> revoked = readRevoked(claims);
@@ -105,6 +109,10 @@ public final class CrlVerifier {
         }
         if (raw instanceof Number n) {
             return Instant.ofEpochSecond(n.longValue());
+        }
+        if (raw instanceof java.util.Date d) {
+            // Nimbus returns NumericDate claims (incl. custom ones like nextUpdate) as Date after parse.
+            return d.toInstant();
         }
         try {
             return Instant.ofEpochSecond(Long.parseLong(raw.toString()));

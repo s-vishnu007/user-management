@@ -41,6 +41,7 @@
         <uuid-creator.version>6.0.0</uuid-creator.version>
         <aspectjweaver.version>1.9.22.1</aspectjweaver.version>
         <tink.version>1.13.0</tink.version>
+        <jacoco-maven-plugin.version>0.8.12</jacoco-maven-plugin.version>
         <!-- Override Spring Boot 3.3.4's managed byte-buddy (1.14.x) so Mockito can instrument
              under newer JDKs (e.g. JDK 24) used for local builds. Backward-compatible with JDK 21. -->
         <byte-buddy.version>1.18.8</byte-buddy.version>
@@ -126,14 +127,56 @@
                     <configuration>
                         <!-- Pin the forked test JVM to UTC: some host JVMs report the legacy Olson id
                              "Asia/Calcutta", which the PostgreSQL server rejects as an invalid TimeZone
-                             on connect. UTC is also the right deterministic default for CI. -->
+                             on connect. UTC is also the right deterministic default for CI.
+
+                             NOTE: We intentionally use <systemPropertyVariables> here and NOT <argLine>.
+                             The JaCoCo prepare-agent goal sets the "argLine" property (injecting the
+                             coverage agent), which Surefire automatically prepends to the forked JVM
+                             command line. Defining <argLine> here would clobber that property and the
+                             agent would never attach (producing empty/zero coverage). Keeping the UTC
+                             pin in systemPropertyVariables lets both coexist. -->
                         <systemPropertyVariables>
                             <user.timezone>UTC</user.timezone>
                         </systemPropertyVariables>
                     </configuration>
                 </plugin>
+                <plugin>
+                    <groupId>org.jacoco</groupId>
+                    <artifactId>jacoco-maven-plugin</artifactId>
+                    <version>${jacoco-maven-plugin.version}</version>
+                    <executions>
+                        <!-- Instruments the test JVM by setting the "argLine" property that Surefire
+                             picks up automatically. Bound to the default 'initialize' phase so it runs
+                             before tests. -->
+                        <execution>
+                            <id>jacoco-prepare-agent</id>
+                            <goals>
+                                <goal>prepare-agent</goal>
+                            </goals>
+                        </execution>
+                        <!-- Generate the HTML/XML/CSV coverage report after tests run. Report-only:
+                             no coverage threshold ('check' goal) is configured yet, so this never
+                             fails the build. -->
+                        <execution>
+                            <id>jacoco-report</id>
+                            <phase>test</phase>
+                            <goals>
+                                <goal>report</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
             </plugins>
         </pluginManagement>
+
+        <plugins>
+            <!-- Activate JaCoCo (configured in pluginManagement above) for every module so coverage
+                 data is produced on `mvn test`/`mvn verify`. Report only; no failing threshold. -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
     </build>
 
     <repositories>

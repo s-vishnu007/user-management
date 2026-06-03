@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & Test (mvn verify)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Temurin JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache local Maven repository
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          # Re-key the cache whenever any pom.xml changes so dependency updates are picked up.
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      # Docker is preinstalled and running on GitHub-hosted ubuntu-latest runners,
+      # so Testcontainers (Postgres via the jdbc:tc URL) works out of the box.
+      - name: Build and test
+        run: mvn -B verify
+
+      # Always upload JaCoCo reports (report-only; no enforced threshold yet) for inspection.
+      - name: Upload JaCoCo coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-coverage
+          path: '**/target/site/jacoco/'
+          if-no-files-found: ignore
+
+  dependency-updates:
+    name: Dependency updates (non-blocking)
+    runs-on: ubuntu-latest
+    # Non-blocking: report informational dependency-update info without failing CI.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Temurin JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache local Maven repository
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      # Lightweight alternative to OWASP dependency-check: just surface newer
+      # dependency versions. Informational only.
+      - name: Display dependency updates
+        run: mvn -B versions:display-dependency-updates

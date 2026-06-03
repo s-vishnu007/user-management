@@ -11,4 +11,9 @@
 
 --changeset cp:13-audit-log-outcome
 ALTER TABLE audit_log ADD COLUMN outcome VARCHAR(16) NOT NULL DEFAULT 'SUCCESS';
---rollback ALTER TABLE audit_log DROP COLUMN outcome;
+ALTER TABLE audit_log ADD CONSTRAINT chk_audit_outcome CHECK (outcome IN ('SUCCESS','DENIED','FAILED'));
+--rollback ALTER TABLE audit_log DROP CONSTRAINT chk_audit_outcome; ALTER TABLE audit_log DROP COLUMN outcome;
+
+--changeset cp:13-audit-log-outcome-index
+CREATE INDEX IF NOT EXISTS idx_audit_log_action_outcome ON audit_log (action, outcome, occurred_at);
+--rollback DROP INDEX IF EXISTS idx_audit_log_action_outcome;
