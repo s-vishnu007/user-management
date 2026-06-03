@@ -41,7 +41,7 @@
         <uuid-creator.version>6.0.0</uuid-creator.version>
         <aspectjweaver.version>1.9.22.1</aspectjweaver.version>
         <tink.version>1.13.0</tink.version>
-        <jacoco-maven-plugin.version>0.8.12</jacoco-maven-plugin.version>
+        <jacoco-maven-plugin.version>0.8.14</jacoco-maven-plugin.version>
         <!-- Override Spring Boot 3.3.4's managed byte-buddy (1.14.x) so Mockito can instrument
              under newer JDKs (e.g. JDK 24) used for local builds. Backward-compatible with JDK 21. -->
         <byte-buddy.version>1.18.8</byte-buddy.version>
@@ -175,6 +175,26 @@
             <plugin>
                 <groupId>org.jacoco</groupId>
                 <artifactId>jacoco-maven-plugin</artifactId>
+            </plugin>
+            <!-- Run *IT integration tests (Testcontainers) on `mvn verify`. Spring Boot's parent
+                 manages the failsafe version but binds no execution, so we bind one here. Modules
+                 without *IT classes simply no-op. UTC pin mirrors surefire (see note above). -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <user.timezone>UTC</user.timezone>
+                    </systemPropertyVariables>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

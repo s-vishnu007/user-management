@@ -57,7 +57,7 @@ public class LicenseToken {
     @Column(name = "last_seen_at")
     private OffsetDateTime lastSeenAt;
 
-    @Column(name = "last_seen_ip", columnDefinition = "inet")
+    @Column(name = "last_seen_ip", length = 45)
     private String lastSeenIp;
 
     @Enumerated(EnumType.STRING)

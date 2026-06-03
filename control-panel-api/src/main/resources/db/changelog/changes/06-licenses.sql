@@ -12,7 +12,9 @@ CREATE TABLE license_tokens (
     revoke_reason TEXT,
     fingerprint VARCHAR(128),
     last_seen_at TIMESTAMPTZ,
-    last_seen_ip INET,
+    -- Stored as text (not inet): the JPA entity maps this as a String and Hibernate binds it as
+    -- VARCHAR, which a strict inet column rejects. Text is sufficient for a last-seen IP.
+    last_seen_ip VARCHAR(45),
     status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','REVOKED','EXPIRED'))
 );
 CREATE INDEX idx_license_tokens_subscription_status ON license_tokens(subscription_id, status);

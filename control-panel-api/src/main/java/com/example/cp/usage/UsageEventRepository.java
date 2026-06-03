@@ -12,13 +12,16 @@ import java.util.UUID;
 @Repository
 public interface UsageEventRepository extends JpaRepository<UsageEvent, UUID> {
 
-    @Query("""
-            SELECT e FROM UsageEvent e
-            WHERE e.subscriptionId = :subId
-              AND (:from IS NULL OR e.occurredAt >= :from)
-              AND (:to IS NULL OR e.occurredAt < :to)
-            ORDER BY e.occurredAt DESC
-            """)
+    // Native query with explicit casts: in JPQL a bare nullable parameter used as `:from IS NULL`
+    // gives Postgres no type to infer ("could not determine data type of parameter"). CAST(... AS
+    // timestamptz) fixes it while keeping the optional-range semantics.
+    @Query(value = """
+            SELECT * FROM usage_events
+            WHERE subscription_id = :subId
+              AND (CAST(:from AS timestamptz) IS NULL OR occurred_at >= :from)
+              AND (CAST(:to   AS timestamptz) IS NULL OR occurred_at <  :to)
+            ORDER BY occurred_at DESC
+            """, nativeQuery = true)
     List<UsageEvent> findInRange(@Param("subId") UUID subscriptionId,
                                  @Param("from") OffsetDateTime from,
                                  @Param("to") OffsetDateTime to);

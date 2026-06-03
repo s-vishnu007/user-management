@@ -62,6 +62,11 @@ public class RbacController {
         Role role = roleRepository.findByCode(body.roleCode())
                 .orElseThrow(() -> ApiException.notFound("Role not found"));
         AuthenticatedUser actor = SecurityUtils.requireUser();
+        // Set the audit action BEFORE the authorization check so a denied/failed assignment is also
+        // recorded (the @AfterThrowing audit advice needs an action present in AuditContext).
+        AuditContext.set("rbac.role.assigned");
+        AuditContext.setTarget("user_role", userId + ":" + role.getId() + (body.orgId() == null ? "" : ":" + body.orgId()));
+        AuditContext.putPayload("role_code", role.getCode());
         rbacAuthz.assertCanAssign(actor, role, userId, body.orgId());
         if (userRoleRepository.countAssignment(userId, role.getId(), body.orgId()) > 0) {
             throw ApiException.conflict("Role already assigned");
@@ -72,9 +77,6 @@ public class RbacController {
                 .orgId(body.orgId())
                 .build();
         userRoleRepository.save(ur);
-        AuditContext.set("rbac.role.assigned");
-        AuditContext.setTarget("user_role", userId + ":" + role.getId() + (body.orgId() == null ? "" : ":" + body.orgId()));
-        AuditContext.putPayload("role_code", role.getCode());
         return ResponseEntity.status(201).body(new UserRoleDto(userId, role.getId(), role.getCode(), body.orgId()));
     }
 

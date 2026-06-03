@@ -1,10 +1,11 @@
 package com.example.cp.usage;
 
 import com.example.cp.common.AuditContext;
-import com.example.cp.common.SecurityUtils;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.NotNull;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -33,11 +34,14 @@ public class UsageIngestController {
         this.service = service;
     }
 
+    // Ingest is bound to the caller's org via the license jti: an API key (or user) for org A cannot
+    // ingest usage against a jti that resolves to org B's subscription. usage.ingest scope required.
     @PostMapping("/usage/ingest")
+    @PreAuthorize("hasAuthority('usage.ingest') and @tenantAccess.canIngestUsageForJti(#body.jti())")
     public ResponseEntity<IngestResponse> ingest(@Valid @RequestBody IngestRequest body) {
-        SecurityUtils.requireUser();
         List<UsageIngestService.IngestEvent> events = body.events().stream()
                 .map(e -> new UsageIngestService.IngestEvent(
+                        e.eventId(),
                         e.featureKey(),
                         e.quantity(),
                         e.occurredAt(),
@@ -70,7 +74,10 @@ public class UsageIngestController {
     ) {}
 
     public record EventDto(
+            String eventId,
             @NotBlank String featureKey,
+            @NotNull(message = "quantity is required")
+            @DecimalMin(value = "0", inclusive = false, message = "quantity must be greater than 0")
             BigDecimal quantity,
             OffsetDateTime occurredAt,
             Map<String, Object> metadata

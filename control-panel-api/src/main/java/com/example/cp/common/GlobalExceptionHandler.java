@@ -39,6 +39,14 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(ApiException.class)
     public ResponseEntity<ProblemDetail> handleApi(ApiException ex, WebRequest req) {
+        // Authorization refusals raised inside a controller (e.g. RBAC/tenant checks throwing 403)
+        // must be auditable. The @AfterThrowing aspect's write happens inside the controller's
+        // rolling-back @Transactional; recording here — after the business tx has unwound — commits
+        // a durable DENIED row (REQUIRES_NEW).
+        int status = ex.getStatus() != null ? ex.getStatus().value() : 500;
+        if (status == 401 || status == 403) {
+            recordDenied("request.denied", ex);
+        }
         // ApiException details are intentionally caller-safe — pass through unchanged.
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getDetail());
         pd.setTitle(ex.getTitle());
@@ -110,6 +118,7 @@ public class GlobalExceptionHandler {
             if (AuditContext.isRecorded()) {
                 return;
             }
+            // (the actual write + markRecorded happen below; AuditContext is cleared in finally)
             String action = AuditContext.currentAction();
             if (action == null || action.isBlank()) {
                 action = defaultAction;
@@ -119,12 +128,23 @@ public class GlobalExceptionHandler {
             String ip = AuditContext.currentIp() != null
                     ? AuditContext.currentIp()
                     : proxyResolver.resolveClientIp(currentRequest());
-            auditWriter.record(AuditContext.currentActorUserId(), AuditContext.currentActorOrgId(),
+            // Prefer the AuditContext actor; fall back to the security principal (the @AfterThrowing
+            // aspect may have already cleared AuditContext before this handler runs).
+            java.util.UUID actorId = AuditContext.currentActorUserId();
+            if (actorId == null) {
+                actorId = SecurityUtils.currentUser().map(AuthenticatedUser::userId).orElse(null);
+            }
+            auditWriter.record(actorId, AuditContext.currentActorOrgId(),
                     action, AuditContext.currentTargetType(), AuditContext.currentTargetId(),
                     payload, ip, AuditOutcome.DENIED, false);
             AuditContext.markRecorded();
         } catch (Exception e) {
             log.warn("Failed to write fallback DENIED audit row: {}", e.getMessage());
+        } finally {
+            // This exception handler is the terminal step for a failed request. Clear the AuditContext
+            // ThreadLocal so the markRecorded sentinel cannot leak to the next request on this pooled
+            // thread (which would otherwise suppress that request's audit row).
+            AuditContext.clear();
         }
     }
 
