@@ -1,5 +1,6 @@
 package com.example.cp.users;
 
+import com.example.cp.auth.PasswordPolicy;
 import com.example.cp.auth.SessionRevocationStore;
 import com.example.cp.common.ApiException;
 import com.example.cp.common.AuditContext;
@@ -21,13 +22,16 @@ public class UserService {
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
     private final SessionRevocationStore revocationStore;
+    private final PasswordPolicy passwordPolicy;
 
     public UserService(UserRepository userRepository,
                        PasswordEncoder passwordEncoder,
-                       SessionRevocationStore revocationStore) {
+                       SessionRevocationStore revocationStore,
+                       PasswordPolicy passwordPolicy) {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
         this.revocationStore = revocationStore;
+        this.passwordPolicy = passwordPolicy;
     }
 
     @Transactional
@@ -35,9 +39,7 @@ public class UserService {
         if (email == null || email.isBlank()) {
             throw ApiException.badRequest("Email is required");
         }
-        if (password == null || password.length() < 8) {
-            throw ApiException.badRequest("Password must be at least 8 characters");
-        }
+        passwordPolicy.validate(password);
         if (userRepository.existsByEmail(email)) {
             throw ApiException.conflict("A user with that email already exists");
         }
@@ -79,9 +81,7 @@ public class UserService {
 
     @Transactional
     public void changePassword(UUID id, String oldPassword, String newPassword) {
-        if (newPassword == null || newPassword.length() < 8) {
-            throw ApiException.badRequest("Password must be at least 8 characters");
-        }
+        passwordPolicy.validate(newPassword);
         User u = get(id);
         if (u.getPasswordHash() == null || !passwordEncoder.matches(oldPassword, u.getPasswordHash())) {
             throw ApiException.badRequest("Old password is incorrect");
@@ -95,9 +95,7 @@ public class UserService {
 
     @Transactional
     public void setPassword(UUID id, String newPassword) {
-        if (newPassword == null || newPassword.length() < 8) {
-            throw ApiException.badRequest("Password must be at least 8 characters");
-        }
+        passwordPolicy.validate(newPassword);
         User u = get(id);
         u.setPasswordHash(passwordEncoder.encode(newPassword));
         revokeAllSessions(u);

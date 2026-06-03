@@ -9,6 +9,7 @@ import com.example.cp.users.User;
 import com.example.cp.users.UserRepository;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
+import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.HttpHeaders;
@@ -29,6 +30,9 @@ import java.util.Set;
 public class JwtAuthFilter extends OncePerRequestFilter {
 
     private static final String BEARER = "Bearer ";
+
+    /** Name of the HttpOnly session cookie minted post-SSO (see SsoSuccessHandler). */
+    private static final String SESSION_COOKIE = "cp_session";
 
     private final SessionTokenService tokenService;
     private final AuthoritiesLoader authoritiesLoader;
@@ -58,13 +62,20 @@ public class JwtAuthFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
+        // Prefer the Bearer Authorization header; when absent, accept the cp_session cookie minted
+        // post-SSO. Both feed the identical parse/validation path below.
+        String token;
         String header = request.getHeader(HttpHeaders.AUTHORIZATION);
-        if (header == null || !header.startsWith(BEARER)) {
+        if (header != null && header.startsWith(BEARER)) {
+            token = header.substring(BEARER.length()).trim();
+        } else {
+            token = sessionCookie(request);
+        }
+        if (token == null || token.isBlank()) {
             chain.doFilter(request, response);
             return;
         }
 
-        String token = header.substring(BEARER.length()).trim();
         SessionTokenService.ParsedToken parsed;
         try {
             parsed = tokenService.parse(token);
@@ -129,6 +140,18 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         } finally {
             AuditContext.clear();
         }
+    }
+
+    /** Returns the value of the cp_session cookie, or null when it is not present. */
+    private static String sessionCookie(HttpServletRequest request) {
+        Cookie[] cookies = request.getCookies();
+        if (cookies == null) return null;
+        for (Cookie c : cookies) {
+            if (SESSION_COOKIE.equals(c.getName())) {
+                return c.getValue();
+            }
+        }
+        return null;
     }
 
     private void writeProblem(HttpServletResponse response, int status, String title, String detail) throws IOException {

@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Logging configuration (#70 structured logging, #71 correlation IDs).
+
+  Auto-detected by Spring Boot because it is named `logback-spring.xml` (no `logging.config`
+  key is set in application.yml). The `-spring` suffix enables the <springProfile> tags below.
+
+  Profiles:
+    * default / dev  -> human-readable PLAIN console output (developer ergonomics), with the
+                        correlation id surfaced as [requestId].
+    * json / prod    -> single-line JSON via LogstashEncoder for log shippers / SIEM ingestion,
+                        including the `requestId` MDC field populated by CorrelationIdFilter.
+
+  CorrelationIdFilter binds the SLF4J MDC key `requestId`; both layouts surface it.
+-->
+<configuration>
+
+    <!-- Spring Boot defaults: log levels coloring, conversion words, CONSOLE/FILE patterns,
+         and the standard logging-system properties. Safe to include in all profiles. -->
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <!-- Plain console pattern: the Spring Boot default with the correlation id appended so a
+         developer sees [requestId] on every line. Falls back to '-' when the MDC is empty. -->
+    <property name="CONSOLE_LOG_PATTERN_WITH_REQUEST_ID"
+              value="%clr(%d{${LOG_DATEFORMAT_PATTERN:-yyyy-MM-dd'T'HH:mm:ss.SSSXXX}}){faint} %clr(${LOG_LEVEL_PATTERN:-%5p}) %clr(${PID:- }){magenta} %clr(---){faint} %clr([%15.15t]){faint} %clr([%X{requestId:--}]){faint} %clr(%-40.40logger{39}){cyan} %clr(:){faint} %m%n${LOG_EXCEPTION_CONVERSION_WORD:-%wEx}"/>
+
+    <!-- ===== Plain console appender (development / default) ===== -->
+    <appender name="CONSOLE_PLAIN" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+            <pattern>${CONSOLE_LOG_PATTERN_WITH_REQUEST_ID}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- ===== JSON console appender (production / log shipping) ===== -->
+    <appender name="CONSOLE_JSON" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <!-- All MDC entries (which include the `requestId` set by CorrelationIdFilter) are
+                 emitted by default as top-level JSON fields. Static identity fields are added too. -->
+            <customFields>{"app":"control-panel","service":"control-panel-api"}</customFields>
+            <fieldNames>
+                <timestamp>@timestamp</timestamp>
+                <version>[ignore]</version>
+                <levelValue>[ignore]</levelValue>
+            </fieldNames>
+        </encoder>
+    </appender>
+
+    <!-- Human-readable console for local/default and the 'dev' profile. -->
+    <springProfile name="default | dev | test">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE_PLAIN"/>
+        </root>
+    </springProfile>
+
+    <!-- Structured JSON for explicit 'json' or 'prod' profiles. -->
+    <springProfile name="json | prod">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE_JSON"/>
+        </root>
+    </springProfile>
+
+    <!-- Any other / unnamed profile combination: default to JSON (prod-safe). The blocks above
+         cover the named cases; this catch-all ensures there is always exactly one root appender. -->
+    <springProfile name="!default &amp; !dev &amp; !test &amp; !json &amp; !prod">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE_JSON"/>
+        </root>
+    </springProfile>
+
+    <!-- Keep Spring Security at INFO (mirrors application.yml logging.level). -->
+    <logger name="org.springframework.security" level="INFO"/>
+
+</configuration>

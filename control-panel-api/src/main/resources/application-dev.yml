@@ -21,3 +21,12 @@ management:
     health:
       # Full component breakdown is convenient when debugging locally.
       show-details: always
+
+# Logging: with spring.profiles.active=dev, logback-spring.xml selects a plain, human-readable
+# CONSOLE appender instead of the structured JSON used in prod (the <springProfile name="dev">
+# block in logback-spring.xml). No logging.config override is required here — Spring auto-detects
+# logback-spring.xml and exposes the active profile to it.
+logging:
+  level:
+    # Slightly chattier locally; SQL/binding stays off unless explicitly raised.
+    com.example: DEBUG

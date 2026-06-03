@@ -8,6 +8,7 @@ import com.example.cp.common.AuthenticatedUser;
 import com.example.cp.common.Ids;
 import com.example.cp.common.SecurityUtils;
 import com.example.cp.common.TrustedProxyResolver;
+import com.example.cp.mfa.MfaService;
 import com.example.cp.orgs.OrgMember;
 import com.example.cp.orgs.OrgMemberRepository;
 import com.example.cp.orgs.Organization;
@@ -62,10 +63,11 @@ public class AuthController {
     private final SessionTokenService tokenService;
     private final AuthoritiesLoader authoritiesLoader;
     private final PasswordResetTokenRepository resetTokenRepository;
-    private final LoginAttempt loginAttempt;
+    private final LoginRateLimiter loginRateLimiter;
     private final OrgMemberRepository orgMemberRepository;
     private final OrganizationRepository organizationRepository;
     private final SessionRevocationStore revocationStore;
+    private final MfaService mfaService;
     private final AuditWriter auditWriter;
     private final TrustedProxyResolver proxyResolver;
     private final boolean exposeResetToken;
@@ -76,10 +78,11 @@ public class AuthController {
                           SessionTokenService tokenService,
                           AuthoritiesLoader authoritiesLoader,
                           PasswordResetTokenRepository resetTokenRepository,
-                          LoginAttempt loginAttempt,
+                          LoginRateLimiter loginRateLimiter,
                           OrgMemberRepository orgMemberRepository,
                           OrganizationRepository organizationRepository,
                           SessionRevocationStore revocationStore,
+                          MfaService mfaService,
                           AuditWriter auditWriter,
                           TrustedProxyResolver proxyResolver,
                           @Value("${app.auth.expose-reset-token:false}") boolean exposeResetToken) {
@@ -89,10 +92,11 @@ public class AuthController {
         this.tokenService = tokenService;
         this.authoritiesLoader = authoritiesLoader;
         this.resetTokenRepository = resetTokenRepository;
-        this.loginAttempt = loginAttempt;
+        this.loginRateLimiter = loginRateLimiter;
         this.orgMemberRepository = orgMemberRepository;
         this.organizationRepository = organizationRepository;
         this.revocationStore = revocationStore;
+        this.mfaService = mfaService;
         this.auditWriter = auditWriter;
         this.proxyResolver = proxyResolver;
         this.exposeResetToken = exposeResetToken;
@@ -103,7 +107,7 @@ public class AuthController {
     public LoginResponse login(@Valid @RequestBody LoginRequest body, HttpServletRequest request) {
         String email = body.email() == null ? "" : body.email().trim();
         String ip = proxyResolver.resolveClientIp(request);
-        if (loginAttempt.isLocked(email)) {
+        if (loginRateLimiter.isLocked(email, ip)) {
             // Explicit DENIED write before throwing; mark recorded so the aspect does not duplicate.
             auditWriter.record(null, null, "auth.login.locked", "user", null,
                     Map.of("email", maskEmail(email)), ip, AuditOutcome.DENIED, false);
@@ -113,23 +117,80 @@ public class AuthController {
         Optional<User> userOpt = userRepository.findByEmail(email);
         if (userOpt.isEmpty()) {
             recordLoginFailed(null, email, "unknown_user", ip);
-            loginAttempt.recordFailure(email);
+            loginRateLimiter.recordFailure(email, ip);
             throw ApiException.unauthorized("Invalid email or password");
         }
         User user = userOpt.get();
         if (user.getStatus() != User.Status.ACTIVE) {
             recordLoginFailed(user.getId(), email, "inactive", ip);
-            loginAttempt.recordFailure(email);
+            loginRateLimiter.recordFailure(email, ip);
             throw ApiException.unauthorized("Account is not active");
         }
         if (user.getPasswordHash() == null || !passwordEncoder.matches(body.password(), user.getPasswordHash())) {
             recordLoginFailed(user.getId(), email, "bad_password", ip);
-            loginAttempt.recordFailure(email);
+            loginRateLimiter.recordFailure(email, ip);
             throw ApiException.unauthorized("Invalid email or password");
         }
 
-        loginAttempt.recordSuccess(email);
+        loginRateLimiter.recordSuccess(email, ip);
 
+        // Step 1 of two-step login: when MFA is enabled the password alone yields only a short-lived
+        // challenge — NOT a session token. The session is issued by /mfa/login after a valid code.
+        if (mfaService.isEnabled(user.getId())) {
+            MfaService.MfaChallenge challenge = mfaService.issueChallenge(user.getId(), user.getEmail());
+            AuditContext.set("auth.login.mfa_challenge");
+            AuditContext.setTarget("user", user.getId().toString());
+            return LoginResponse.mfaChallenge(challenge.challenge(), challenge.expiresAt());
+        }
+
+        AuditContext.set("auth.login");
+        AuditContext.setTarget("user", user.getId().toString());
+        return completeSession(user);
+    }
+
+    /**
+     * Step 2 of two-step login: completes authentication for an MFA-enabled user by verifying a
+     * TOTP code against the challenge issued by {@code /login}, returning the full session token.
+     * Public (like {@code /login}) because the caller has no session yet — the bearer of a valid
+     * {@code challenge} + correct {@code code} is the authenticated user.
+     */
+    @PostMapping("/mfa/login")
+    @Transactional
+    public LoginResponse mfaLogin(@Valid @RequestBody MfaLoginRequest body, HttpServletRequest request) {
+        String ip = proxyResolver.resolveClientIp(request);
+
+        // Resolve the subject either from the signed challenge or, as a fallback, by email lookup.
+        UUID userId;
+        if (body.challenge() != null && !body.challenge().isBlank()) {
+            userId = mfaService.parseChallenge(body.challenge());
+        } else if (body.email() != null && !body.email().isBlank()) {
+            userId = userRepository.findByEmail(body.email().trim())
+                    .map(User::getId)
+                    .orElseThrow(() -> ApiException.unauthorized("Invalid MFA challenge"));
+        } else {
+            throw ApiException.badRequest("A challenge or email is required");
+        }
+
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> ApiException.unauthorized("Invalid MFA challenge"));
+        if (user.getStatus() != User.Status.ACTIVE) {
+            recordLoginFailed(user.getId(), user.getEmail(), "inactive", ip);
+            throw ApiException.unauthorized("Account is not active");
+        }
+        if (!mfaService.verifyLoginCode(user.getId(), body.code())) {
+            recordLoginFailed(user.getId(), user.getEmail(), "bad_mfa_code", ip);
+            loginRateLimiter.recordFailure(user.getEmail(), ip);
+            throw ApiException.unauthorized("Invalid code");
+        }
+
+        loginRateLimiter.recordSuccess(user.getEmail(), ip);
+        AuditContext.set("auth.login.mfa");
+        AuditContext.setTarget("user", user.getId().toString());
+        return completeSession(user);
+    }
+
+    /** Issues the full session token for an authenticated user and stamps last-login. */
+    private LoginResponse completeSession(User user) {
         Set<String> authorities = authoritiesLoader.authoritiesFor(user.getId(), null, user.isSuperAdmin());
         SessionTokenService.IssuedToken issued = tokenService.issue(
                 user.getId(), user.getEmail(), user.isSuperAdmin(), authorities, user.getTokenVersion());
@@ -137,10 +198,7 @@ public class AuthController {
         user.setLastLoginAt(OffsetDateTime.now());
         userRepository.save(user);
 
-        AuditContext.set("auth.login");
-        AuditContext.setTarget("user", user.getId().toString());
-
-        return new LoginResponse(issued.token(), issued.expiresAt(), UserDto.from(user));
+        return LoginResponse.session(issued.token(), issued.expiresAt(), UserDto.from(user));
     }
 
     @PostMapping("/logout")
@@ -294,7 +352,31 @@ public class AuthController {
             @NotBlank @Email String email,
             @NotBlank String password) {}
 
-    public record LoginResponse(String accessToken, Instant expiresAt, UserDto user) {}
+    /**
+     * Unified login result. For a non-MFA user (or step-2 completion) it carries the full session
+     * ({@code accessToken}, {@code expiresAt}, {@code user}) with {@code mfaRequired=false}. For an
+     * MFA-enabled user step-1 returns {@code mfaRequired=true} with a short-lived {@code mfaChallenge}
+     * (and {@code mfaChallengeExpiresAt}) and NO session token — the client must call
+     * {@code /api/v1/auth/mfa/login} with a code to obtain a session.
+     */
+    @com.fasterxml.jackson.annotation.JsonInclude(
+            com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+    public record LoginResponse(String accessToken, Instant expiresAt, UserDto user,
+                                boolean mfaRequired, String mfaChallenge, Instant mfaChallengeExpiresAt) {
+
+        static LoginResponse session(String accessToken, Instant expiresAt, UserDto user) {
+            return new LoginResponse(accessToken, expiresAt, user, false, null, null);
+        }
+
+        static LoginResponse mfaChallenge(String challenge, Instant challengeExpiresAt) {
+            return new LoginResponse(null, null, null, true, challenge, challengeExpiresAt);
+        }
+    }
+
+    public record MfaLoginRequest(
+            @Email String email,
+            String challenge,
+            @NotBlank String code) {}
 
     public record PasswordResetRequest(@NotBlank @Email String email) {}
 

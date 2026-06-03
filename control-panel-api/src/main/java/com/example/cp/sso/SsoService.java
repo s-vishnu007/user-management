@@ -1,8 +1,11 @@
 package com.example.cp.sso;
 
+import com.example.cp.audit.AuditOutcome;
+import com.example.cp.audit.AuditWriter;
 import com.example.cp.common.ApiException;
 import com.example.cp.common.AuditContext;
 import com.example.cp.common.Ids;
+import com.example.cp.common.SecurityUtils;
 import com.example.cp.keys.KeyEncryptor;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -14,6 +17,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -26,12 +30,15 @@ public class SsoService {
     private final SsoProviderRepository repo;
     private final UrlGuard urlGuard;
     private final KeyEncryptor keyEncryptor;
+    private final AuditWriter auditWriter;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    public SsoService(SsoProviderRepository repo, UrlGuard urlGuard, KeyEncryptor keyEncryptor) {
+    public SsoService(SsoProviderRepository repo, UrlGuard urlGuard, KeyEncryptor keyEncryptor,
+                      AuditWriter auditWriter) {
         this.repo = repo;
         this.urlGuard = urlGuard;
         this.keyEncryptor = keyEncryptor;
+        this.auditWriter = auditWriter;
     }
 
     @Transactional(readOnly = true)
@@ -94,10 +101,16 @@ public class SsoService {
                 .createdAt(OffsetDateTime.now())
                 .build();
         SsoProvider saved = repo.save(p);
-        AuditContext.set("sso.provider.created");
-        AuditContext.setTarget("sso_provider", saved.getId().toString());
-        AuditContext.putPayload("org_id", orgId.toString());
-        AuditContext.putPayload("type", type.name());
+
+        // Fail-closed audit: this high-value config change is recorded INLINE in this transaction,
+        // so a forensic gap is impossible (the row commits atomically with the provider). markRecorded()
+        // stops the AuditInterceptor aspect from writing a duplicate row for the same request.
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("org_id", orgId.toString());
+        payload.put("type", type.name());
+        auditWriter.record(actorUserId(), orgId, "sso.provider.created", "sso_provider",
+                saved.getId().toString(), payload, currentIp(), AuditOutcome.SUCCESS, true);
+        AuditContext.markRecorded();
         return saved;
     }
 
@@ -105,8 +118,24 @@ public class SsoService {
     public void delete(UUID id) {
         SsoProvider p = repo.findById(id).orElseThrow(() -> ApiException.notFound("SSO provider not found"));
         repo.delete(p);
-        AuditContext.set("sso.provider.deleted");
-        AuditContext.setTarget("sso_provider", id.toString());
+
+        // Fail-closed audit (see create() for rationale): record inline + suppress the aspect duplicate.
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", p.getType() != null ? p.getType().name() : null);
+        auditWriter.record(actorUserId(), p.getOrgId(), "sso.provider.deleted", "sso_provider",
+                id.toString(), payload, currentIp(), AuditOutcome.SUCCESS, true);
+        AuditContext.markRecorded();
+    }
+
+    /** Actor for the fail-closed audit row: AuditContext (set by JwtAuthFilter) then the security context. */
+    private static UUID actorUserId() {
+        UUID actor = AuditContext.currentActorUserId();
+        if (actor != null) return actor;
+        return SecurityUtils.currentUser().map(u -> u.userId()).orElse(null);
+    }
+
+    private static String currentIp() {
+        return AuditContext.currentIp();
     }
 
     @Transactional(readOnly = true)

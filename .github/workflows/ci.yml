@@ -79,3 +79,62 @@ jobs:
       # dependency versions. Informational only.
       - name: Display dependency updates
         run: mvn -B versions:display-dependency-updates
+
+  dependency-check:
+    name: Vulnerability scan (OWASP + npm audit, non-blocking)
+    runs-on: ubuntu-latest
+    # Separate, non-blocking job: surfaces known-vulnerable dependencies without gating the build.
+    # The main "build" job stays the only required check; this never fails CI.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Temurin JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache local Maven repository
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      # Cache the OWASP NVD data feed so scans don't re-download the full CVE database every run.
+      - name: Cache OWASP NVD data
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/owasp/dependency-check-data
+          key: ${{ runner.os }}-owasp-nvd
+
+      # Run the OWASP dependency-check Maven goal across the reactor. continue-on-error on the job
+      # plus a non-failing CVSS threshold keeps this purely informational.
+      - name: OWASP dependency-check
+        continue-on-error: true
+        run: >-
+          mvn -B org.owasp:dependency-check-maven:check
+          -Dformats=HTML,JSON
+          -DfailBuildOnCVSS=11
+
+      - name: Upload OWASP dependency-check report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-dependency-check
+          path: '**/target/dependency-check-report.*'
+          if-no-files-found: ignore
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # npm audit on the admin UI lockfile. Non-blocking: report vulnerabilities, never fail CI.
+      - name: npm audit (admin-ui)
+        continue-on-error: true
+        working-directory: admin-ui
+        run: npm audit --audit-level=high

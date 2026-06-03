@@ -1,6 +1,10 @@
 spring:
   application:
     name: control-panel
+  # Graceful shutdown: on SIGTERM, stop accepting new requests and let in-flight ones drain
+  # (bounded by the per-phase timeout below) instead of cutting connections immediately.
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/cp}
     username: ${DB_USER:cp}
@@ -24,6 +28,8 @@ spring:
 
 server:
   port: 8080
+  # Drain in-flight requests on shutdown (paired with spring.lifecycle.timeout-per-shutdown-phase).
+  shutdown: graceful
   max-http-request-header-size: 16KB
   tomcat:
     max-http-form-post-size: 256KB
@@ -37,6 +43,25 @@ management:
   endpoint:
     health:
       show-details: never
+      # Expose Kubernetes-style liveness/readiness probe groups at
+      # /actuator/health/liveness and /actuator/health/readiness.
+      probes:
+        enabled: true
+  health:
+    # Contribute application lifecycle state to the probe groups above.
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+  # Tag all Micrometer metrics (incl. /actuator/prometheus) with the application name so
+  # dashboards/SLOs can distinguish instances of different services in a shared registry.
+  metrics:
+    tags:
+      application: control-panel
+  prometheus:
+    metrics:
+      export:
+        enabled: true
 
 springdoc:
   swagger-ui:
@@ -50,6 +75,20 @@ app:
       enabled: true
     # Prod default MUST stay false; only application-dev.yml flips this to true.
     expose-reset-token: ${APP_AUTH_EXPOSE_RESET_TOKEN:false}
+    # Login lockout / brute-force throttling. Counters are keyed per-account and per-IP; when a
+    # RedisConnectionFactory is present they are cluster-safe, otherwise they fall back to in-memory.
+    lockout:
+      # Failed attempts per account within the window before the account is locked.
+      max-attempts: ${APP_AUTH_LOCKOUT_MAX_ATTEMPTS:5}
+      # Sliding window over which failed attempts are counted.
+      window: ${APP_AUTH_LOCKOUT_WINDOW:PT5M}
+      # How long an account stays locked once max-attempts is reached.
+      lockout: ${APP_AUTH_LOCKOUT_DURATION:PT15M}
+      # Global per-IP failed-attempt ceiling within the window (mitigates spraying across accounts).
+      per-ip-max: ${APP_AUTH_LOCKOUT_PER_IP_MAX:20}
+  mfa:
+    # Master switch for TOTP multi-factor authentication on password logins.
+    enabled: ${APP_MFA_ENABLED:true}
   cors:
     allowed-origins: ${APP_CORS_ALLOWED_ORIGINS:http://localhost:5173}
   ratelimit:
@@ -91,6 +130,15 @@ app:
     listener:
       enabled: ${APP_EVENTS_LISTENER_ENABLED:false}
       poll-ms: 1000
+  observability:
+    # HTTP access logging (method, path, status, latency, client IP) emitted via the structured
+    # logger. Enabled by default in prod; application-dev.yml may leave it on with console output.
+    access-log:
+      enabled: ${APP_ACCESS_LOG_ENABLED:true}
+    # Correlation/trace id propagation across HTTP -> DB -> outbox -> NOTIFY hops, surfaced in the
+    # structured logs as an MDC field. The encoder/MDC wiring lives in logback-spring.xml.
+    tracing:
+      enabled: ${APP_TRACING_ENABLED:true}
 
 # The bucket4j Spring Boot starter auto-config requires a configured cache and would fail at
 # startup (NoCacheConfiguredException). We do not use it — rate limiting is a custom in-memory
@@ -98,6 +146,9 @@ app:
 bucket4j:
   enabled: false
 
+# Logging is configured by logback-spring.xml (auto-detected on the classpath; no logging.config
+# needed). Prod emits structured JSON via net.logstash.logback; the "dev" profile selects a plain
+# console appender (see application-dev.yml). These levels apply regardless of appender.
 logging:
   level:
     org.springframework.security: INFO

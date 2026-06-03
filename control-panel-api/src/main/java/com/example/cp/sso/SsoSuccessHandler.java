@@ -2,21 +2,27 @@ package com.example.cp.sso;
 
 import com.example.cp.audit.AuditOutcome;
 import com.example.cp.audit.AuditWriter;
+import com.example.cp.auth.SessionTokenService;
 import com.example.cp.common.Ids;
 import com.example.cp.common.TrustedProxyResolver;
 import com.example.cp.orgs.OrgMember;
 import com.example.cp.orgs.OrgMemberRepository;
+import com.example.cp.rbac.AuthoritiesLoader;
 import com.example.cp.users.User;
 import com.example.cp.users.UserRepository;
 
 import java.util.Map;
+import java.util.Set;
 import jakarta.servlet.ServletException;
+import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken;
+import org.springframework.security.oauth2.core.oidc.user.OidcUser;
 import org.springframework.security.oauth2.core.user.OAuth2User;
 import org.springframework.security.saml2.provider.service.authentication.Saml2AuthenticatedPrincipal;
 import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
@@ -32,20 +38,40 @@ public class SsoSuccessHandler implements AuthenticationSuccessHandler {
 
     private static final Logger log = LoggerFactory.getLogger(SsoSuccessHandler.class);
 
+    /** Session cookie name shared with {@code JwtAuthFilter}, which also accepts it as the bearer token. */
+    public static final String SESSION_COOKIE = "cp_session";
+
     private final UserRepository userRepo;
     private final OrgMemberRepository memberRepo;
+    private final SsoProviderRepository providerRepo;
+    private final SsoIdentityRepository identityRepo;
     private final AuditWriter auditWriter;
     private final TrustedProxyResolver trustedProxyResolver;
+    private final SessionTokenService sessionTokenService;
+    private final AuthoritiesLoader authoritiesLoader;
 
     @Value("${app.ui.base-url:http://localhost:5173}")
     private String uiBaseUrl;
 
+    /**
+     * Whether the {@code cp_session} cookie carries the {@code Secure} attribute. Defaults to true
+     * (production posture: cookie only sent over HTTPS); may be set to false for local http dev.
+     */
+    @Value("${app.auth.cookie-secure:true}")
+    private boolean cookieSecure;
+
     public SsoSuccessHandler(UserRepository userRepo, OrgMemberRepository memberRepo,
-                             AuditWriter auditWriter, TrustedProxyResolver trustedProxyResolver) {
+                             SsoProviderRepository providerRepo, SsoIdentityRepository identityRepo,
+                             AuditWriter auditWriter, TrustedProxyResolver trustedProxyResolver,
+                             SessionTokenService sessionTokenService, AuthoritiesLoader authoritiesLoader) {
         this.userRepo = userRepo;
         this.memberRepo = memberRepo;
+        this.providerRepo = providerRepo;
+        this.identityRepo = identityRepo;
         this.auditWriter = auditWriter;
         this.trustedProxyResolver = trustedProxyResolver;
+        this.sessionTokenService = sessionTokenService;
+        this.authoritiesLoader = authoritiesLoader;
     }
 
     @Override
@@ -54,6 +80,11 @@ public class SsoSuccessHandler implements AuthenticationSuccessHandler {
         String name = extractName(authentication);
         UUID orgId = extractOrgId(request);
         String ip = trustedProxyResolver.resolveClientIp(request);
+
+        // Resolve the matched provider from the registration id baked into the authentication.
+        // The (provider, subject) pair — never bare email — is the durable identity key (#48).
+        SsoProvider provider = resolveProvider(authentication);
+        String subject = extractSubject(authentication);
 
         if (email == null) {
             log.warn("SSO success without an email claim — redirecting to UI without provisioning");
@@ -71,21 +102,142 @@ public class SsoSuccessHandler implements AuthenticationSuccessHandler {
             return;
         }
 
-        Optional<User> existing = userRepo.findByEmail(email);
-        boolean created = existing.isEmpty();
-        User user = existing.orElseGet(() -> jitCreateUser(email, name));
-        if (created) {
-            // JIT provisioning must be audited (finding #5) since it bypasses UserService.createUser.
-            auditWriter.record(user.getId(), orgId, "user.created", "user", user.getId().toString(),
-                    Map.of("via", "sso", "email", mask(email)), ip, AuditOutcome.SUCCESS, false);
+        // 1) Strong binding: an existing (provider, subject) identity wins regardless of the asserted
+        //    email, so a hostile IdP that changes the email it sends cannot hijack another account.
+        User user = null;
+        if (provider != null && subject != null) {
+            Optional<SsoIdentity> bound = identityRepo.findByProviderIdAndSubject(provider.getId(), subject);
+            if (bound.isPresent()) {
+                user = userRepo.findById(bound.get().getUserId()).orElse(null);
+            }
         }
+
+        boolean created = false;
+        if (user == null) {
+            // 2) First login for this (provider, subject). Auto-linking by email and JIT provisioning
+            //    are gated on the provider's verified-domain allow-list (#40); deny otherwise.
+            if (provider == null) {
+                log.warn("SSO success could not be matched to a provider — refusing to provision/login");
+                auditWriter.record(null, orgId, "sso.login", "sso", null,
+                        Map.of("reason", "unknown-provider", "email", mask(email)), ip, AuditOutcome.DENIED, false);
+                response.sendRedirect(uiBaseUrl + "?sso=error");
+                return;
+            }
+            if (!emailDomainAllowed(provider, email)) {
+                log.warn("SSO email domain not in provider {} allow-list for {} — refusing to provision/login",
+                        provider.getId(), mask(email));
+                auditWriter.record(null, provider.getOrgId(), "sso.login", "sso", provider.getId().toString(),
+                        Map.of("reason", "email-domain-not-allowed", "email", mask(email)), ip, AuditOutcome.DENIED, false);
+                response.sendRedirect(uiBaseUrl + "?sso=domain");
+                return;
+            }
+            Optional<User> existing = userRepo.findByEmail(email);
+            created = existing.isEmpty();
+            // Never auto-promote to super_admin: jitCreateUser sets superAdmin=false; an existing
+            // user keeps its current flags (we only link, never elevate).
+            user = existing.orElseGet(() -> jitCreateUser(email, name));
+            if (created) {
+                // JIT provisioning must be audited (finding #5) since it bypasses UserService.createUser.
+                auditWriter.record(user.getId(), orgId, "user.created", "user", user.getId().toString(),
+                        Map.of("via", "sso", "email", mask(email)), ip, AuditOutcome.SUCCESS, false);
+            }
+            // 3) Persist the (provider, subject) -> user binding so future logins skip the email path.
+            if (subject != null) {
+                identityRepo.save(SsoIdentity.builder()
+                        .id(Ids.newId())
+                        .providerId(provider.getId())
+                        .subject(subject)
+                        .userId(user.getId())
+                        .createdAt(OffsetDateTime.now())
+                        .build());
+                auditWriter.record(user.getId(), provider.getOrgId(), "sso.identity.linked", "sso_identity",
+                        user.getId().toString(),
+                        Map.of("provider_id", provider.getId().toString(), "via", "sso"), ip, AuditOutcome.SUCCESS, false);
+            }
+        }
+
         if (orgId != null && ensureMembership(orgId, user.getId())) {
             auditWriter.record(user.getId(), orgId, "org.member.added", "org_member", user.getId().toString(),
                     Map.of("via", "sso", "role", OrgMember.Role.MEMBER.name()), ip, AuditOutcome.SUCCESS, false);
         }
         auditWriter.record(user.getId(), orgId, "sso.login", "user", user.getId().toString(),
                 Map.of("email", mask(email)), ip, AuditOutcome.SUCCESS, false);
+
+        // Mint a control-panel session JWT and set it as the cp_session cookie on the redirect so the
+        // post-SSO browser is actually authenticated to the API (closes the broken-STATELESS gap).
+        issueSessionCookie(response, user);
         response.sendRedirect(uiBaseUrl + "?sso=success");
+    }
+
+    /** Sets the HttpOnly / Secure / SameSite=Lax {@code cp_session} cookie carrying a fresh session JWT. */
+    private void issueSessionCookie(HttpServletResponse response, User user) {
+        boolean superAdmin = user.isSuperAdmin();
+        Set<String> authorities = authoritiesLoader.authoritiesFor(user.getId(), null, superAdmin);
+        SessionTokenService.IssuedToken issued =
+                sessionTokenService.issue(user.getId(), user.getEmail(), superAdmin, authorities, user.getTokenVersion());
+
+        long maxAgeSeconds = sessionTokenService.ttl().getSeconds();
+        Cookie cookie = new Cookie(SESSION_COOKIE, issued.token());
+        cookie.setHttpOnly(true);
+        cookie.setSecure(cookieSecure);
+        cookie.setPath("/");
+        cookie.setMaxAge((int) Math.min(maxAgeSeconds, Integer.MAX_VALUE));
+        cookie.setAttribute("SameSite", "Lax");
+        response.addCookie(cookie);
+    }
+
+    /** Resolve the {@link SsoProvider} from the registration id (oidc-&lt;uuid&gt; / saml-&lt;uuid&gt;). */
+    private SsoProvider resolveProvider(Authentication auth) {
+        String registrationId = null;
+        if (auth instanceof OAuth2AuthenticationToken o) {
+            registrationId = o.getAuthorizedClientRegistrationId();
+        } else if (auth.getPrincipal() instanceof Saml2AuthenticatedPrincipal s) {
+            registrationId = s.getRelyingPartyRegistrationId();
+        }
+        if (registrationId == null) return null;
+        int dash = registrationId.indexOf('-');
+        if (dash < 0) return null;
+        try {
+            UUID providerId = UUID.fromString(registrationId.substring(dash + 1));
+            return providerRepo.findById(providerId).orElse(null);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /** The stable IdP subject identifier: OIDC {@code sub}, SAML NameID. Never the email. */
+    private String extractSubject(Authentication auth) {
+        Object principal = auth.getPrincipal();
+        if (principal instanceof OidcUser oidc) {
+            String sub = oidc.getSubject();
+            if (sub != null && !sub.isBlank()) return sub;
+        }
+        if (principal instanceof OAuth2User o) {
+            Object sub = o.getAttributes().get("sub");
+            if (sub != null && !sub.toString().isBlank()) return sub.toString();
+            return o.getName();
+        }
+        if (principal instanceof Saml2AuthenticatedPrincipal s) {
+            return s.getName();
+        }
+        return auth.getName();
+    }
+
+    /**
+     * True when the email's domain matches one of the provider's allowed_email_domains (CSV).
+     * A null/blank allow-list denies all (deny JIT/auto-link by default, per SsoProvider docs).
+     */
+    private boolean emailDomainAllowed(SsoProvider provider, String email) {
+        String allowed = provider.getAllowedEmailDomains();
+        if (allowed == null || allowed.isBlank()) return false;
+        int at = email.lastIndexOf('@');
+        if (at < 0 || at == email.length() - 1) return false;
+        String domain = email.substring(at + 1).trim().toLowerCase();
+        for (String d : allowed.split(",")) {
+            String candidate = d.trim().toLowerCase();
+            if (!candidate.isEmpty() && candidate.equals(domain)) return true;
+        }
+        return false;
     }
 
     /** True only when the IdP explicitly asserts email_verified=false (OIDC). Absent claim => not blocked. */

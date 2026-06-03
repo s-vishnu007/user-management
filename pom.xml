@@ -36,6 +36,8 @@
         <lombok.version>1.18.40</lombok.version>
         <springdoc-openapi.version>2.6.0</springdoc-openapi.version>
         <bucket4j.version>0.12.8</bucket4j.version>
+        <totp.version>1.7.1</totp.version>
+        <logstash-logback-encoder.version>7.4</logstash-logback-encoder.version>
         <testcontainers.version>1.20.3</testcontainers.version>
         <postgresql.version>42.7.4</postgresql.version>
         <uuid-creator.version>6.0.0</uuid-creator.version>
@@ -95,6 +97,18 @@
                 <groupId>com.google.crypto.tink</groupId>
                 <artifactId>tink</artifactId>
                 <version>${tink.version}</version>
+            </dependency>
+            <!-- MFA (TOTP). Version managed here; control-panel-api declares it without a version. -->
+            <dependency>
+                <groupId>dev.samstevens.totp</groupId>
+                <artifactId>totp</artifactId>
+                <version>${totp.version}</version>
+            </dependency>
+            <!-- Structured (JSON) logging encoder for logback-spring.xml. Version managed here. -->
+            <dependency>
+                <groupId>net.logstash.logback</groupId>
+                <artifactId>logstash-logback-encoder</artifactId>
+                <version>${logstash-logback-encoder.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
