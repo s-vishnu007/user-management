@@ -24,7 +24,7 @@ import java.util.UUID;
 @Builder
 public class SigningKey {
 
-    public enum Status { ACTIVE, RETIRED }
+    public enum Status { ACTIVE, RETIRED, COMPROMISED }
 
     @Id
     @Column(name = "id", nullable = false)

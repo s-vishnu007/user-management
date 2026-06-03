@@ -48,4 +48,10 @@ databaseChangeLog:
   - include:
       file: db/changelog/changes/15-idempotency.sql
   - include:
+      file: db/changelog/changes/16-scim.sql
+  - include:
+      file: db/changelog/changes/16-billing.sql
+  - include:
+      file: db/changelog/changes/16-keys.sql
+  - include:
       file: db/changelog/changes/99-auth-password-reset.sql

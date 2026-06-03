@@ -116,6 +116,91 @@ public class KeyService {
         return generateNewActiveKey();
     }
 
+    /**
+     * Flags the key identified by {@code kid} as COMPROMISED. A COMPROMISED key is excluded from
+     * {@link #listPublishedKeys()}/{@link #toJwk}, so {@code /.well-known/jwks.json} drops it
+     * immediately and offline verifiers stop trusting tokens signed by it at their next JWKS refresh.
+     *
+     * <p>If the compromised key was the current ACTIVE key, a fresh ACTIVE key is generated so the
+     * panel can keep issuing/signing without a gap.
+     *
+     * @return the newly generated ACTIVE key when the compromised key had been ACTIVE; otherwise empty.
+     */
+    @Transactional
+    public Optional<SigningKey> markCompromised(String kid) {
+        SigningKey key = repo.findByKid(kid)
+                .orElseThrow(() -> ApiException.notFound("No signing key with kid " + kid));
+
+        if (key.getStatus() == SigningKey.Status.COMPROMISED) {
+            // Idempotent: already flagged, nothing further to do (and never re-generate on a repeat call).
+            AuditContext.set("key.compromised");
+            AuditContext.setTarget("signing_key", kid);
+            return Optional.empty();
+        }
+
+        boolean wasActive = key.getStatus() == SigningKey.Status.ACTIVE;
+        key.setStatus(SigningKey.Status.COMPROMISED);
+        if (key.getRetiredAt() == null) {
+            key.setRetiredAt(OffsetDateTime.now());
+        }
+        repo.save(key);
+
+        AuditContext.set("key.compromised");
+        AuditContext.setTarget("signing_key", kid);
+
+        try {
+            outbox.publish("signing_key", kid, "KeyCompromised",
+                    Map.of("kid", kid, "was_active", wasActive));
+        } catch (Exception e) {
+            log.warn("Failed to publish KeyCompromised outbox event: {}", e.getMessage());
+        }
+
+        log.warn("Marked signing key kid={} COMPROMISED (wasActive={}) — excluded from JWKS immediately",
+                kid, wasActive);
+
+        if (wasActive) {
+            // generateNewActiveKey only retires keys still in ACTIVE status, so the COMPROMISED key
+            // we just saved is left untouched; it simply mints and persists a new ACTIVE key.
+            return Optional.of(generateNewActiveKey());
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Re-encrypts every signing key's private material under the currently-active key-encryption-key
+     * (KEK). Walks {@code signing_keys}, decrypts each {@code private_key_encrypted} blob (transparently
+     * handling legacy unversioned blobs and blobs under older KEKs), and re-encrypts it under the active
+     * KEK. Rows already encrypted under the active KEK are still re-wrapped (idempotent and cheap), so a
+     * single call leaves every row tagged with the active KEK id.
+     *
+     * @return the number of signing-key rows re-encrypted.
+     */
+    @Transactional
+    public int rotateKek() {
+        String activeKekId = encryptor.activeKekId();
+        List<SigningKey> all = repo.findAll();
+        int count = 0;
+        for (SigningKey k : all) {
+            byte[] plaintext = encryptor.decrypt(k.getPrivateKeyEncrypted());
+            k.setPrivateKeyEncrypted(encryptor.encrypt(plaintext));
+            repo.save(k);
+            count++;
+        }
+
+        AuditContext.set("key.kek.rotated");
+        AuditContext.setTarget("kek", activeKekId);
+
+        try {
+            outbox.publish("kek", activeKekId, "KekRotated",
+                    Map.of("active_kek_id", activeKekId, "reencrypted_count", count));
+        } catch (Exception e) {
+            log.warn("Failed to publish KekRotated outbox event: {}", e.getMessage());
+        }
+
+        log.info("Rotated KEK: re-encrypted {} signing key(s) under active KEK id='{}'", count, activeKekId);
+        return count;
+    }
+
     @Transactional(readOnly = true)
     public ActiveKey getActiveSigningKeyPair() {
         SigningKey row = repo.findFirstByStatusOrderByCreatedAtDesc(SigningKey.Status.ACTIVE)
@@ -149,18 +234,24 @@ public class KeyService {
 
     /**
      * Returns ACTIVE plus RETIRED keys retired within the retention window — these are
-     * what we publish at /.well-known/jwks.json.
+     * what we publish at /.well-known/jwks.json. COMPROMISED keys are excluded so a flagged key
+     * drops out of the JWKS immediately (offline verifiers stop trusting it at their next refresh).
      */
     @Transactional(readOnly = true)
     public List<SigningKey> listPublishedKeys() {
         OffsetDateTime cutoff = OffsetDateTime.now().minusMonths(RETENTION_MONTHS);
-        return repo.findByStatusOrRetiredAtAfter(SigningKey.Status.ACTIVE, cutoff);
+        return repo.findPublishable(SigningKey.Status.ACTIVE, SigningKey.Status.RETIRED, cutoff);
     }
 
     /**
-     * Build a Nimbus OKP/Ed25519 JWK for one key row.
+     * Build a Nimbus OKP/Ed25519 JWK for one key row. COMPROMISED keys are never publishable, so a
+     * compromised row is rejected here as a defensive backstop in case a caller passes one directly
+     * (the JWKS path already filters them out via {@link #listPublishedKeys()}).
      */
     public JWK toJwk(SigningKey row) {
+        if (row.getStatus() == SigningKey.Status.COMPROMISED) {
+            throw new IllegalStateException("Refusing to publish a COMPROMISED signing key as a JWK: kid=" + row.getKid());
+        }
         try {
             PublicKey pub = parsePublicKeyPem(row.getPublicKeyPem());
             byte[] rawPub = extractRawEd25519PublicBytes(pub);
@@ -227,9 +318,13 @@ public class KeyService {
     }
 
     private static String generateKid() {
-        // human-readable timestamp + short id
+        // human-readable timestamp + a RANDOM suffix. Use the last 12 hex chars of the UUID (the random
+        // node segment) — NOT the first 8, which in a time-ordered UUIDv7 are the timestamp prefix and
+        // collide for keys generated within the same instant (e.g. a compromise replacement minted in the
+        // same second as the bootstrap key), violating the unique kid constraint.
         String stamp = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").format(java.time.LocalDateTime.now());
-        String shortId = Ids.newId().toString().substring(0, 8);
+        String hex = Ids.newId().toString().replace("-", "");
+        String shortId = hex.substring(hex.length() - 12);
         return "key-" + stamp + "-" + shortId;
     }
 

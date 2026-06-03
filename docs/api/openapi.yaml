@@ -58,7 +58,11 @@ tags:
   - name: licenses
     description: License issue, download, read, revoke, signed CRL, and seat/node heartbeat.
   - name: keys
-    description: Signing key generation and rotation.
+    description: Signing key generation, rotation, key-encryption-key (KEK) rotation, and compromise.
+  - name: scim
+    description: SCIM 2.0 user provisioning / deprovisioning for enterprise IdPs.
+  - name: billing
+    description: Per-org billing account, usage-rated invoices, and invoice lifecycle.
   - name: jwks
     description: Public JWKS endpoint.
   - name: usage
@@ -986,6 +990,7 @@ paths:
     post:
       tags: [keys]
       summary: Generate a new active Ed25519 signing key and demote the previous one.
+      description: Requires `key.rotate`. Retires the current ACTIVE signing key and generates a fresh ACTIVE Ed25519 key.
       responses:
         '200':
           description: New active key.
@@ -993,6 +998,323 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SigningKey'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/admin/keys/rotate-kek:
+    post:
+      tags: [keys]
+      summary: Rotate the key-encryption-key (KEK) — re-encrypt all signing private keys under the active KEK.
+      description: |
+        Requires `key.rotate`. Re-encrypts every signing key's private material (`signing_keys.private_key_encrypted`)
+        under the currently-active KEK selected by `app.signing.active-master-key-id`. This is a pure data
+        operation: it does NOT change which signing key is ACTIVE nor what `/.well-known/jwks.json` publishes.
+        Run it after adding a new KEK id to `app.signing.master-keys` and pointing `active-master-key-id` at it.
+      responses:
+        '200':
+          description: KEK rotation complete.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KekRotationResult'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/admin/keys/{kid}/compromise:
+    parameters:
+      - in: path
+        name: kid
+        required: true
+        schema: { type: string }
+        description: The signing key id (kid) to flag.
+    post:
+      tags: [keys]
+      summary: Flag a signing key as COMPROMISED (drops it from the JWKS immediately).
+      description: |
+        Requires `key.rotate`. Marks the key COMPROMISED so it is excluded from `/.well-known/jwks.json`
+        at the next verifier refresh. If the compromised key was the ACTIVE signing key, a fresh ACTIVE key
+        is generated and returned so issuance continues uninterrupted.
+      responses:
+        '200':
+          description: Key flagged compromised (with a replacement when the compromised key had been ACTIVE).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompromiseResult'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================================
+  # scim (SCIM 2.0 provisioning)
+  # ============================================================
+  /scim/v2/Users:
+    get:
+      tags: [scim]
+      summary: List / filter SCIM users provisioned in the caller's org.
+      description: |
+        SCIM 2.0 ListResponse (RFC 7644 §3.4.2). Authenticated with an org-bound API key (or super-admin)
+        carrying the `scim.manage` scope; the org is resolved from the key's org binding, so the IdP only
+        ever sees users it provisioned in its own tenant. Supports the SCIM `filter=userName eq "x"` form
+        and 1-based `startIndex`/`count` pagination. Errors use the SCIM Error shape, not RFC-7807.
+      parameters:
+        - in: query
+          name: filter
+          required: false
+          schema: { type: string }
+          description: 'SCIM filter, e.g. `userName eq "alice@example.com"`.'
+        - in: query
+          name: startIndex
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+          description: 1-based index of the first result.
+        - in: query
+          name: count
+          required: false
+          schema: { type: integer, minimum: 0, default: 100 }
+      responses:
+        '200':
+          description: SCIM ListResponse.
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimListResponse'
+        '401':
+          $ref: '#/components/responses/ScimUnauthorized'
+        '403':
+          $ref: '#/components/responses/ScimForbidden'
+    post:
+      tags: [scim]
+      summary: Provision (create) a SCIM user in the caller's org.
+      description: |
+        Creates (or links) the control-panel user for the IdP-supplied `userName` (email) and records a
+        per-org `scim_user_mappings` row keyed by `externalId`. Returns the created SCIM User with its
+        per-org resource `id` (the mapping id) and `meta.location`. Requires `scim.manage`.
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema:
+              $ref: '#/components/schemas/ScimUser'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScimUser'
+      responses:
+        '201':
+          description: User provisioned.
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimUser'
+        '400':
+          $ref: '#/components/responses/ScimBadRequest'
+        '409':
+          $ref: '#/components/responses/ScimConflict'
+
+  /scim/v2/Users/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+        description: The per-org SCIM resource id (the `scim_user_mappings` id), not the raw user id.
+    get:
+      tags: [scim]
+      summary: Fetch a provisioned SCIM user by its per-org resource id.
+      responses:
+        '200':
+          description: SCIM User.
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimUser'
+        '404':
+          $ref: '#/components/responses/ScimNotFound'
+    put:
+      tags: [scim]
+      summary: Replace a provisioned SCIM user (full update).
+      description: |
+        Full-replace semantics per SCIM. Used by IdPs to update the display name or to set `active=false`
+        to deprovision — flipping `active` to false suspends the control-panel user and revokes its sessions.
+        Requires `scim.manage`.
+      requestBody:
+        required: true
+        content:
+          application/scim+json:
+            schema:
+              $ref: '#/components/schemas/ScimUser'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScimUser'
+      responses:
+        '200':
+          description: User updated.
+          content:
+            application/scim+json:
+              schema:
+                $ref: '#/components/schemas/ScimUser'
+        '400':
+          $ref: '#/components/responses/ScimBadRequest'
+        '404':
+          $ref: '#/components/responses/ScimNotFound'
+    delete:
+      tags: [scim]
+      summary: Deprovision (delete) a SCIM user mapping.
+      description: |
+        Removes the per-org SCIM mapping and deactivates the underlying control-panel user (suspends it and
+        revokes its sessions); the immutable audit history is preserved. Requires `scim.manage`.
+      responses:
+        '204':
+          description: Deprovisioned.
+        '404':
+          $ref: '#/components/responses/ScimNotFound'
+
+  # ============================================================
+  # billing
+  # ============================================================
+  /api/v1/orgs/{orgId}/billing/account:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+    get:
+      tags: [billing]
+      summary: Get the organization's billing account.
+      description: |
+        Returns the org's `(provider, externalCustomerId, currency)` billing account. Requires `billing.read`
+        and access to the org (super-admin, an api-key bound to the org, or org membership). 404 until an
+        account exists (one is auto-created the first time an invoice is generated for the org).
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingAccount'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/orgs/{orgId}/billing/invoices:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+    get:
+      tags: [billing]
+      summary: List the organization's invoices (newest first).
+      description: Requires `billing.read` and access to the org.
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Invoice'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [billing]
+      summary: Generate a DRAFT invoice by rating a subscription's usage for its current period.
+      description: |
+        Rates the subscription's `usage_quotas` into a new DRAFT invoice with per-feature line items and a
+        denormalized total. The subscription MUST belong to `{orgId}` (else 404 — never cross-tenant). The
+        org billing account is auto-created on first use. Authorized for an org admin/owner (or super-admin).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InvoiceGenerateRequest'
+      responses:
+        '201':
+          description: DRAFT invoice created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invoice'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/orgs/{orgId}/billing/invoices/{invoiceId}:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+      - in: path
+        name: invoiceId
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [billing]
+      summary: Get an invoice with its rated line items.
+      description: Requires `billing.read` and access to the org. 404 if the invoice is not in this org.
+      responses:
+        '200':
+          description: OK.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvoiceDetail'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/orgs/{orgId}/billing/invoices/{invoiceId}/issue:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+      - in: path
+        name: invoiceId
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [billing]
+      summary: Finalize a DRAFT invoice (DRAFT -> ISSUED).
+      description: |
+        Records the charge + finalization with the billing provider, stamps `issuedAt`, and freezes the
+        line items/total. Only a DRAFT invoice can be issued (else 409). Audited fail-closed. Authorized
+        for an org admin/owner (or super-admin).
+      responses:
+        '200':
+          description: Issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invoice'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/orgs/{orgId}/billing/invoices/{invoiceId}/void:
+    parameters:
+      - $ref: '#/components/parameters/OrgIdParam'
+      - in: path
+        name: invoiceId
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [billing]
+      summary: Void a DRAFT or ISSUED invoice (-> VOID).
+      description: |
+        A PAID or already-VOID invoice is a 409. Audited fail-closed. Authorized for an org admin/owner
+        (or super-admin).
+      responses:
+        '200':
+          description: Voided.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invoice'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
   # ============================================================
   # jwks (public)
@@ -1551,6 +1873,36 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/ProblemDetail'
+    ScimBadRequest:
+      description: SCIM request invalid.
+      content:
+        application/scim+json:
+          schema:
+            $ref: '#/components/schemas/ScimError'
+    ScimUnauthorized:
+      description: Missing or invalid SCIM credentials.
+      content:
+        application/scim+json:
+          schema:
+            $ref: '#/components/schemas/ScimError'
+    ScimForbidden:
+      description: SCIM credential lacks the scim.manage scope or org access.
+      content:
+        application/scim+json:
+          schema:
+            $ref: '#/components/schemas/ScimError'
+    ScimNotFound:
+      description: SCIM resource does not exist in the caller's org.
+      content:
+        application/scim+json:
+          schema:
+            $ref: '#/components/schemas/ScimError'
+    ScimConflict:
+      description: SCIM uniqueness conflict (e.g. userName/externalId already provisioned).
+      content:
+        application/scim+json:
+          schema:
+            $ref: '#/components/schemas/ScimError'
 
   schemas:
 
@@ -2027,11 +2379,37 @@ components:
         algorithm: { type: string, example: 'EdDSA' }
         status:
           type: string
-          enum: [ACTIVE, INACTIVE, RETIRED]
+          enum: [ACTIVE, RETIRED, COMPROMISED]
+          description: |
+            ACTIVE keys sign new licenses; RETIRED keys are kept for verification within the retention
+            window; COMPROMISED keys are dropped from the JWKS immediately (verifiers stop trusting them).
         createdAt: { type: string, format: date-time }
         retiredAt: { type: string, format: date-time, nullable: true }
         publicKeyPem: { type: string, description: 'PEM-encoded Ed25519 public key.' }
       required: [kid, algorithm, status]
+
+    KekRotationResult:
+      type: object
+      description: Result of a key-encryption-key rotation.
+      properties:
+        reEncrypted:
+          type: integer
+          description: Number of signing-key rows re-encrypted under the active KEK.
+      required: [reEncrypted]
+
+    CompromiseResult:
+      type: object
+      description: Result of flagging a signing key COMPROMISED.
+      properties:
+        kid: { type: string, description: 'The flagged signing key id.' }
+        replacementGenerated:
+          type: boolean
+          description: True only when the compromised key had been ACTIVE and a fresh ACTIVE key was generated.
+        replacement:
+          allOf: [ { $ref: '#/components/schemas/SigningKey' } ]
+          nullable: true
+          description: The newly generated ACTIVE key, present only when replacementGenerated is true.
+      required: [kid, replacementGenerated]
 
     JwksResponse:
       type: object
@@ -2314,3 +2692,142 @@ components:
         createdAt: { type: string, format: date-time }
         deliveredAt: { type: string, format: date-time, nullable: true }
       required: [id, subscriptionId, eventId, status, attempts, createdAt]
+
+    # ---- scim (SCIM 2.0, RFC 7643/7644) ----
+    ScimName:
+      type: object
+      description: SCIM 2.0 `name` complex attribute (RFC 7643 §4.1.1).
+      properties:
+        formatted: { type: string, description: 'Full name; maps to users.full_name.' }
+        givenName: { type: string }
+        familyName: { type: string }
+
+    ScimEmail:
+      type: object
+      description: SCIM 2.0 multi-valued `emails` entry. The control panel emits one primary work email.
+      properties:
+        value: { type: string, format: email }
+        type: { type: string, example: 'work' }
+        primary: { type: boolean }
+      required: [value]
+
+    ScimUser:
+      type: object
+      description: |
+        SCIM 2.0 core User resource (`urn:ietf:params:scim:schemas:core:2.0:User`). `id` is the per-org
+        SCIM resource id (the mapping id), `userName` is the control-panel email, and `active` mirrors
+        `users.status == ACTIVE`. Optional attributes are omitted when unset.
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+          example: ['urn:ietf:params:scim:schemas:core:2.0:User']
+        id: { type: string, description: 'Per-org SCIM resource id (the scim_user_mappings id).' }
+        externalId: { type: string, description: 'The IdP-assigned id; unique within the org.' }
+        userName: { type: string, format: email, description: 'The control-panel email (unique login).' }
+        name: { $ref: '#/components/schemas/ScimName' }
+        displayName: { type: string }
+        emails:
+          type: array
+          items: { $ref: '#/components/schemas/ScimEmail' }
+        active: { type: boolean }
+        meta:
+          type: object
+          properties:
+            resourceType: { type: string, example: 'User' }
+            location: { type: string, example: '/scim/v2/Users/<id>' }
+      required: [userName]
+
+    ScimListResponse:
+      type: object
+      description: SCIM 2.0 ListResponse envelope (RFC 7644 §3.4.2). startIndex/itemsPerPage are 1-based.
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+          example: ['urn:ietf:params:scim:api:messages:2.0:ListResponse']
+        totalResults: { type: integer }
+        startIndex: { type: integer }
+        itemsPerPage: { type: integer }
+        Resources:
+          type: array
+          items: { $ref: '#/components/schemas/ScimUser' }
+      required: [schemas, totalResults, startIndex, itemsPerPage, Resources]
+
+    ScimError:
+      type: object
+      description: SCIM 2.0 Error response (RFC 7644 §3.12). Distinct from RFC-7807 ProblemDetail.
+      properties:
+        schemas:
+          type: array
+          items: { type: string }
+          example: ['urn:ietf:params:scim:api:messages:2.0:Error']
+        status: { type: string, description: 'HTTP status code as a string.', example: '404' }
+        scimType: { type: string, description: 'Optional SCIM error keyword.', example: 'uniqueness' }
+        detail: { type: string }
+      required: [schemas, status]
+
+    # ---- billing ----
+    BillingAccount:
+      type: object
+      description: One billing account per organization, binding it to a (provider, customer, currency).
+      properties:
+        id: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        provider: { type: string, example: 'manual', description: 'BillingProvider name that created the account.' }
+        externalCustomerId: { type: string, nullable: true, description: 'Provider customer id (locally generated for the manual provider).' }
+        currency: { type: string, example: 'USD', description: 'ISO-4217 currency code.' }
+        createdAt: { type: string, format: date-time }
+      required: [id, orgId, provider, currency, createdAt]
+
+    InvoiceStatus:
+      type: string
+      enum: [DRAFT, ISSUED, PAID, VOID]
+
+    Invoice:
+      type: object
+      description: A rated billing period for a single subscription.
+      properties:
+        id: { type: string, format: uuid }
+        orgId: { type: string, format: uuid }
+        subscriptionId: { type: string, format: uuid }
+        periodStart: { type: string, format: date-time }
+        periodEnd: { type: string, format: date-time }
+        status: { $ref: '#/components/schemas/InvoiceStatus' }
+        currency: { type: string, example: 'USD' }
+        totalAmount:
+          type: number
+          description: Sum of the line-item amounts (in the invoice currency), persisted denormalized.
+        issuedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+      required: [id, orgId, subscriptionId, periodStart, periodEnd, status, currency, totalAmount, createdAt]
+
+    InvoiceLineItem:
+      type: object
+      description: One rated line of an invoice — a feature's metered quantity times its unit amount.
+      properties:
+        id: { type: string, format: uuid }
+        invoiceId: { type: string, format: uuid }
+        featureKey: { type: string }
+        quantity: { type: number }
+        unitAmount: { type: number }
+        amount: { type: number, description: 'quantity * unitAmount.' }
+        description: { type: string, nullable: true }
+      required: [id, invoiceId, featureKey, quantity, unitAmount, amount]
+
+    InvoiceDetail:
+      allOf:
+        - $ref: '#/components/schemas/Invoice'
+        - type: object
+          properties:
+            lineItems:
+              type: array
+              items: { $ref: '#/components/schemas/InvoiceLineItem' }
+          required: [lineItems]
+
+    InvoiceGenerateRequest:
+      type: object
+      description: Selects the subscription whose usage is rated into a new DRAFT invoice for the org.
+      required: [subscriptionId]
+      properties:
+        subscriptionId: { type: string, format: uuid }

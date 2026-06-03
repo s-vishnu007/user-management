@@ -26,8 +26,18 @@ app:
       enabled: true
     expose-reset-token: false
   signing:
+    # Legacy single-key value (kept so KeyEncryptor's reserved "default" KEK still resolves under test).
     master-key: dGVzdC1tYXN0ZXIta2V5LWZvci10ZXN0aW5nLW9ubHkhIQ==
+    # Versioned KEK list for the rotated KeyEncryptor (single "id:base64" string, not a YAML map):
+    # id "v1" mirrors the legacy test master-key above so KeyEncryptor + KeyService bootstrap (and any
+    # KEK-rotation tests) resolve a key under test. The legacy master-key remains registered as the
+    # reserved "default" KEK for decrypting any unversioned blobs.
+    active-master-key-id: v1
+    master-keys: v1:dGVzdC1tYXN0ZXIta2V5LWZvci10ZXN0aW5nLW9ubHkhIQ==
     issuer: https://test-control-panel.example.com
     default-audience: docker-app-test
+  billing:
+    currency: USD
+    default-unit-amount: 0
   licenses:
     default-ttl-days: 365

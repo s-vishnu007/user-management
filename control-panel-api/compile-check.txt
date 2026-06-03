@@ -1,0 +1,78 @@
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by lombok.permit.Permit
+WARNING: Please consider reporting this to the maintainers of class lombok.permit.Permit
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+src\main\java\com\example\cp\keys\SigningKey.java:9: error: package lombok does not exist
+import lombok.AllArgsConstructor;
+             ^
+src\main\java\com\example\cp\keys\SigningKey.java:10: error: package lombok does not exist
+import lombok.Builder;
+             ^
+src\main\java\com\example\cp\keys\SigningKey.java:11: error: package lombok does not exist
+import lombok.Getter;
+             ^
+src\main\java\com\example\cp\keys\SigningKey.java:12: error: package lombok does not exist
+import lombok.NoArgsConstructor;
+             ^
+src\main\java\com\example\cp\keys\SigningKey.java:13: error: package lombok does not exist
+import lombok.Setter;
+             ^
+src\main\java\com\example\cp\keys\SigningKey.java:20: error: cannot find symbol
+@Getter
+ ^
+  symbol: class Getter
+src\main\java\com\example\cp\keys\SigningKey.java:21: error: cannot find symbol
+@Setter
+ ^
+  symbol: class Setter
+src\main\java\com\example\cp\keys\SigningKey.java:22: error: cannot find symbol
+@NoArgsConstructor
+ ^
+  symbol: class NoArgsConstructor
+src\main\java\com\example\cp\keys\SigningKey.java:23: error: cannot find symbol
+@AllArgsConstructor
+ ^
+  symbol: class AllArgsConstructor
+src\main\java\com\example\cp\keys\SigningKey.java:24: error: cannot find symbol
+@Builder
+ ^
+  symbol: class Builder
+src\main\java\com\example\cp\keys\SigningKey.java:24: error: package lombok does not exist
+@Builder
+^
+src\main\java\com\example\cp\keys\SigningKey.java:31: error: package lombok does not exist
+    private UUID id;
+                 ^
+src\main\java\com\example\cp\keys\SigningKey.java:34: error: package lombok does not exist
+    private String kid;
+                   ^
+src\main\java\com\example\cp\keys\SigningKey.java:37: error: package lombok does not exist
+    private String algorithm;
+                   ^
+src\main\java\com\example\cp\keys\SigningKey.java:40: error: package lombok does not exist
+    private String publicKeyPem;
+                   ^
+src\main\java\com\example\cp\keys\SigningKey.java:43: error: package lombok does not exist
+    private byte[] privateKeyEncrypted;
+                   ^
+src\main\java\com\example\cp\keys\SigningKey.java:47: error: package lombok does not exist
+    private Status status;
+                   ^
+src\main\java\com\example\cp\keys\SigningKey.java:50: error: package lombok does not exist
+    private OffsetDateTime createdAt;
+                           ^
+src\main\java\com\example\cp\keys\SigningKey.java:53: error: package lombok does not exist
+    private OffsetDateTime retiredAt;
+                           ^
+src\main\java\com\example\cp\keys\SigningKey.java:21: error: package lombok does not exist
+@Setter
+^
+src\main\java\com\example\cp\keys\SigningKey.java:22: error: package lombok does not exist
+@NoArgsConstructor
+^
+src\main\java\com\example\cp\keys\SigningKey.java:23: error: package lombok does not exist
+@AllArgsConstructor
+^
+22 errors
+JAVAC_EXIT=1
+ls: cannot access 'target/keycheck-out/com/example/cp/keys/': No such file or directory

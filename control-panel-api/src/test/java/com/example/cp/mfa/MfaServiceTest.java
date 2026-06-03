@@ -46,7 +46,9 @@ class MfaServiceTest {
         for (int i = 0; i < key.length; i++) {
             key[i] = (byte) (i + 1);
         }
-        KeyEncryptor encryptor = new KeyEncryptor(Base64.getEncoder().encodeToString(key));
+        // 3-arg KeyEncryptor: legacy/default master key only (no versioned KEK list / active id) — it
+        // registers under the reserved default id and becomes the active KEK for this test.
+        KeyEncryptor encryptor = new KeyEncryptor(Base64.getEncoder().encodeToString(key), "", "");
         invokeInit(encryptor);
         service = new MfaService(repository, encryptor, "Test Issuer", "x".repeat(40));
     }

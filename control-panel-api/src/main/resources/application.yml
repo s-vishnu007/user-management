@@ -96,8 +96,22 @@ app:
       capacity: ${APP_RATELIMIT_AUTH_CAPACITY:10}
       refill-per-minute: ${APP_RATELIMIT_AUTH_REFILL:10}
   signing:
-    # AES master key (base64) used to encrypt signing private keys at rest — required, no default
+    # AES master key (base64) used to encrypt signing private keys at rest — required, no default.
+    # Legacy single-key property: KeyEncryptor still honours this for back-compat, registering it under
+    # the reserved key-encryption-key (KEK) id "default" so blobs encrypted before KEK rotation was
+    # introduced keep decrypting. New deployments should prefer the master-keys list below.
     master-key: ${APP_KEY_ENC_MASTER:}
+    # Versioned key-encryption keys (KEK) for envelope-encrypting signing private keys at rest.
+    # KeyEncryptor binds this as a single STRING of comma/space-separated "id:base64key" entries
+    # (NOT a YAML map) — each base64 value decodes to a 16/24/32-byte AES key. active-master-key-id
+    # selects which entry encrypts NEW blobs; every listed id (plus the legacy "default" KEK derived
+    # from master-key above) can still DECRYPT old blobs, so a KEK rotation is: add a new id, point
+    # active-master-key-id at it, then re-encrypt existing rows (KeyService.rotateKek).
+    # Default keeps the existing single master key working unchanged: id "v1" maps to APP_KEY_ENC_MASTER
+    # and is the active id, so an undecorated deployment behaves exactly as before this property existed
+    # (the same key bytes are simply addressed as KEK "v1" instead of the legacy "default").
+    active-master-key-id: ${APP_SIGNING_ACTIVE_MASTER_KEY_ID:v1}
+    master-keys: ${APP_SIGNING_MASTER_KEYS:v1:${APP_KEY_ENC_MASTER:}}
     issuer: ${APP_ISSUER:https://control-panel.example.com}
     default-audience: ${APP_DEFAULT_AUDIENCE:docker-app-prod}
     crl-ttl: ${APP_CRL_TTL:PT1H}
@@ -119,6 +133,13 @@ app:
       - apikey.revoked
       - sso.provider.created
       - sso.provider.deleted
+  billing:
+    # ISO-4217 currency code applied to billing records / invoice line items when an org or plan does
+    # not pin its own currency.
+    currency: ${APP_BILLING_CURRENCY:USD}
+    # Default per-unit amount (in the currency's minor units, e.g. cents) used when a plan or usage
+    # feature carries no explicit price. 0 = entitlement-only (the product tracks usage but bills nothing).
+    default-unit-amount: ${APP_BILLING_DEFAULT_UNIT_AMOUNT:0}
   licenses:
     default-ttl-days: 365
   licensing:
