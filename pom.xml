@@ -52,7 +52,7 @@
              - bouncycastle bcprov-jdk18on < 1.78 (pulled in via OpenSAML / spring-security-saml2) -->
         <json-smart.version>2.5.2</json-smart.version>
         <bouncycastle.version>1.78.1</bouncycastle.version>
-        <uuid-creator.version>6.0.0</uuid-creator.version>
+        <uuid-creator.version>6.1.1</uuid-creator.version>
         <aspectjweaver.version>1.9.22.1</aspectjweaver.version>
         <tink.version>1.13.0</tink.version>
         <jacoco-maven-plugin.version>0.8.14</jacoco-maven-plugin.version>
