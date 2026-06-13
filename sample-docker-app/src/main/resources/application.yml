@@ -4,6 +4,14 @@ server:
 spring:
   application:
     name: sample-docker-app
+  # Credentials for the actuator endpoints (HTTP Basic). Override in any real deployment.
+  # /actuator/license (license plan/jti/permissions/features) and detailed /actuator/health are
+  # authentication-gated by SecurityConfig; the basic health/info probes stay open for orchestration.
+  security:
+    user:
+      name: ${ACTUATOR_USER:actuator}
+      password: ${ACTUATOR_PASSWORD:changeit}
+      roles: ACTUATOR
 
 app:
   license:

@@ -6,6 +6,7 @@ import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Getter;
@@ -32,6 +33,14 @@ public class LicenseToken {
     @Id
     @Column(name = "id", nullable = false)
     private UUID id;
+
+    /**
+     * Optimistic-locking version. Prevents a heartbeat's last-seen flush from silently rewriting a
+     * revocation/expiry committed by a concurrent transaction back to ACTIVE (lost update, P1-8).
+     */
+    @Version
+    @Column(name = "version", nullable = false)
+    private long version;
 
     @Column(name = "jti", nullable = false, unique = true, length = 64)
     private String jti;
@@ -62,6 +71,14 @@ public class LicenseToken {
 
     @Column(name = "last_seen_ip", length = 45)
     private String lastSeenIp;
+
+    /**
+     * When the lifecycle sweeper emitted the (single) {@code license.expiring} warning for this
+     * token. Durable dedup marker so a token is warned at most once even across concurrent sweeps
+     * and after the outbox is purged. NULL = never warned.
+     */
+    @Column(name = "expiring_warned_at")
+    private OffsetDateTime expiringWarnedAt;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false)

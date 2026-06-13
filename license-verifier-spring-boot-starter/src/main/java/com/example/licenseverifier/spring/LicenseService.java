@@ -100,6 +100,15 @@ public class LicenseService {
             throw new LicenseException("License file not found at " + licPath);
         }
         String contents = Files.readString(licPath);
+        // When read-only-on-expiry is enabled, tolerate a past exp at load time so a container
+        // restart after expiry can establish the documented READ_ONLY grace rather than failing
+        // closed (strict=true would otherwise refuse to start, strict=false would sit in
+        // NOT_LOADED and deny everything). Signature, audience, issuer, nbf and revocation are
+        // still fully enforced by verifyAllowingExpired; status() then maps the expired-but-valid
+        // license to READ_ONLY. When read-only-on-expiry is off, expiry remains a hard rejection.
+        if (properties.isReadOnlyOnExpiry()) {
+            return verifier.verifyAllowingExpired(contents);
+        }
         return verifier.verify(contents);
     }
 

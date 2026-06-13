@@ -16,7 +16,7 @@ export function KeysPage() {
   const keysQ = useQuery({ queryKey: ['keys'], queryFn: keys.list });
 
   const rotateMut = useMutation({
-    mutationFn: keys.rotate,
+    mutationFn: () => keys.rotate(),
     onSuccess: (k) => {
       qc.invalidateQueries({ queryKey: ['keys'] });
       setConfirmOpen(false);

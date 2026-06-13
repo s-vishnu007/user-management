@@ -6,9 +6,13 @@ spring:
   lifecycle:
     timeout-per-shutdown-phase: 30s
   datasource:
-    url: ${DB_URL:jdbc:postgresql://localhost:5432/cp}
-    username: ${DB_USER:cp}
-    password: ${DB_PASS:cp}
+    # Credentials are REQUIRED (no default). Shipping a packaged jar with a baked-in cp/cp fallback
+    # means a misconfigured prod deployment silently connects with well-known credentials, so the
+    # ${VAR:?message} form aborts startup when the env var is absent or empty. The dev profile
+    # (application-dev.yml) and the test profile (application-test.yml) supply their own local values.
+    url: ${DB_URL:?DB_URL must be set (e.g. jdbc:postgresql://postgres:5432/cp)}
+    username: ${DB_USER:?DB_USER must be set}
+    password: ${DB_PASS:?DB_PASS must be set}
   jpa:
     hibernate:
       ddl-auto: validate
@@ -21,6 +25,14 @@ spring:
   data:
     redis:
       url: ${REDIS_URL:redis://localhost:6379}
+      # Redis backs the session-revocation denylist and the brute-force/lockout counters, so it MUST
+      # NOT run unauthenticated on a shared network. The compose redis service now starts with
+      # `--requirepass` from REDIS_PASSWORD; supply the same value here. Empty (the local-loopback dev
+      # default) means no AUTH is sent, which only works against a passwordless local Redis.
+      password: ${REDIS_PASSWORD:}
+      # Bound how long a Redis command may block. Without this, a Redis stall blocks every authenticated
+      # request for Lettuce's default 60s (the denylist check is on the hot path). Keep it short.
+      timeout: ${REDIS_TIMEOUT:2s}
   servlet:
     multipart:
       max-file-size: 1MB
@@ -28,6 +40,15 @@ spring:
 
 server:
   port: 8080
+  # Honour X-Forwarded-* headers from the TLS-terminating reverse proxy. Without this Spring sees
+  # request.isSecure()=false on every (plain-HTTP, proxy-to-app) hop, so Spring Security NEVER emits
+  # the HSTS header and scheme-derived URLs resolve as http. "framework" installs Spring's
+  # ForwardedHeaderFilter, which rewrites scheme/host/port/remote-addr from the forwarded headers.
+  #
+  # OPERATIONAL REQUIREMENT: the fronting proxy MUST set X-Forwarded-Proto (https) and X-Forwarded-For
+  # (the real client IP) and MUST strip any client-supplied copies of those headers, since the app now
+  # trusts them. Pair with app.audit.trusted-proxies so the audit/access-log client-IP view matches.
+  forward-headers-strategy: framework
   # Drain in-flight requests on shutdown (paired with spring.lifecycle.timeout-per-shutdown-phase).
   shutdown: graceful
   max-http-request-header-size: 16KB
@@ -39,7 +60,11 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,prometheus   # but non-health endpoints are secured via SecurityConfig
+        # Minimal set: health (probes), info, and the Prometheus scrape endpoint only. The raw
+        # /actuator/metrics tree (per-meter drill-down, URI inventory, latencies) is intentionally NOT
+        # web-exposed — Prometheus scrapes /actuator/prometheus instead. Non-health endpoints remain
+        # secured via SecurityConfig; this keeps the exposed surface small even if that layer regresses.
+        include: health,info,prometheus
   endpoint:
     health:
       show-details: never
@@ -64,7 +89,12 @@ management:
         enabled: true
 
 springdoc:
+  # Disabled by default (prod): handing an anonymous client the full enumerated API surface is an
+  # information-disclosure aid. The dev profile (application-dev.yml) re-enables both for local use.
+  api-docs:
+    enabled: false
   swagger-ui:
+    enabled: false
     path: /swagger
 
 app:
@@ -169,11 +199,14 @@ app:
       poll-ms: 1000
   observability:
     # HTTP access logging (method, path, status, latency, client IP) emitted via the structured
-    # logger. Enabled by default in prod; application-dev.yml may leave it on with console output.
+    # logger. Implemented by AccessLogFilter, which is gated on this flag; health-probe traffic is
+    # excluded. Enabled by default in prod; application-dev.yml leaves it on with console output.
     access-log:
       enabled: ${APP_ACCESS_LOG_ENABLED:true}
     # Correlation/trace id propagation across HTTP -> DB -> outbox -> NOTIFY hops, surfaced in the
-    # structured logs as an MDC field. The encoder/MDC wiring lives in logback-spring.xml.
+    # structured logs as an MDC field. Always active via CorrelationIdFilter (which binds the
+    # `requestId` MDC key consumed by both the plain and JSON encoders in logback-spring.xml); this
+    # flag is retained for compatibility / future cross-process propagation toggling.
     tracing:
       enabled: ${APP_TRACING_ENABLED:true}
 

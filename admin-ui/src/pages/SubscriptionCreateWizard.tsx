@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { apiErrorMessage, licenses, orgs, plans, subscriptions } from '@/lib/api';
+import { apiErrorMessage, licenses, newIdempotencyKey, orgs, plans, subscriptions } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Button, Card, CardBody, CardHeader, Field, Input, PageLoader, Select, StatusBadge } from '@/components/ui';
 import { useToast } from '@/lib/toast';
@@ -64,19 +64,16 @@ export function SubscriptionCreateWizard() {
     step === 3 ||
     step === 4;
 
-  const createMut = useMutation({
-    mutationFn: () =>
-      subscriptions.create(state.orgId, {
-        planId: state.planId,
-        startsAt: new Date(state.startsAt).toISOString(),
-        endsAt: new Date(state.endsAt).toISOString(),
-        seats: state.seats,
-        overrides: state.overrides.length ? state.overrides : undefined,
-      }),
-  });
+  // `submitting` stays true for the WHOLE create(+issue+download) sequence so the action buttons
+  // remain disabled until everything settles — a re-enable mid-flight is what lets a double-click
+  // create a duplicate subscription (finding P2). We also send a stable per-submission
+  // Idempotency-Key so a retried/duplicate POST is collapsed server-side.
+  const [submitting, setSubmitting] = useState(false);
+  // Hold one idempotency key per submission attempt; regenerated only when a submission begins.
+  const idempotencyKey = useRef<string>(newIdempotencyKey());
 
   const issueAndDownload = async (subId: string) => {
-    const lic = await licenses.issue(subId);
+    const lic = await licenses.issue(subId, undefined, idempotencyKey.current + ':license');
     try {
       const { blob, filename } = await licenses.download(lic.jti);
       triggerDownload(blob, filename);
@@ -87,13 +84,28 @@ export function SubscriptionCreateWizard() {
   };
 
   const onCreate = async (issue: boolean) => {
+    if (submitting) return;
+    setSubmitting(true);
     try {
-      const sub = await createMut.mutateAsync();
+      const sub = await subscriptions.create(
+        state.orgId,
+        {
+          planId: state.planId,
+          startsAt: new Date(state.startsAt).toISOString(),
+          endsAt: new Date(state.endsAt).toISOString(),
+          seats: state.seats,
+          overrides: state.overrides.length ? state.overrides : undefined,
+        },
+        idempotencyKey.current,
+      );
       toast.success('Subscription created');
       if (issue) await issueAndDownload(sub.id);
       navigate(`/subscriptions/${sub.id}`);
     } catch (e) {
       toast.error(apiErrorMessage(e));
+      // Failed: allow another attempt with a fresh key (the failed POST left no committed row).
+      idempotencyKey.current = newIdempotencyKey();
+      setSubmitting(false);
     }
   };
 
@@ -202,7 +214,7 @@ export function SubscriptionCreateWizard() {
                       >
                         <div className="flex items-center justify-between">
                           <div className="font-medium text-slate-900">{p.name}</div>
-                          <StatusBadge status={p.status ?? 'ACTIVE'} />
+                          <StatusBadge status={p.active === false ? 'RETIRED' : 'ACTIVE'} />
                         </div>
                         <div className="mt-1 text-xs text-slate-500">
                           <code>{p.code}</code>
@@ -212,7 +224,7 @@ export function SubscriptionCreateWizard() {
                         ) : null}
                         <div className="mt-3 text-xs text-slate-500">
                           {p.permissions?.length ?? 0} permissions ·{' '}
-                          {p.features?.length ?? 0} features
+                          {Object.keys(p.features ?? {}).length} features
                         </div>
                       </button>
                     );
@@ -376,7 +388,7 @@ export function SubscriptionCreateWizard() {
         <Button
           variant="outline"
           onClick={() => setStep((s) => Math.max(0, s - 1))}
-          disabled={step === 0}
+          disabled={step === 0 || submitting}
         >
           Back
         </Button>
@@ -390,11 +402,12 @@ export function SubscriptionCreateWizard() {
               <Button
                 variant="outline"
                 onClick={() => onCreate(false)}
-                loading={createMut.isPending}
+                loading={submitting}
+                disabled={submitting}
               >
                 Create subscription
               </Button>
-              <Button onClick={() => onCreate(true)} loading={createMut.isPending}>
+              <Button onClick={() => onCreate(true)} loading={submitting} disabled={submitting}>
                 Create and issue license
               </Button>
             </>

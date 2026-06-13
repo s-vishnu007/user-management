@@ -56,4 +56,20 @@ databaseChangeLog:
   - include:
       file: db/changelog/changes/17-optimistic-locking.sql
   - include:
+      file: db/changelog/changes/18-apikey-optimistic-lock.sql
+  - include:
+      file: db/changelog/changes/18-license-token-optimistic-lock.sql
+  - include:
+      file: db/changelog/changes/18-billing-invoice-integrity.sql
+  - include:
+      file: db/changelog/changes/18-webhook-fanout-integrity.sql
+  - include:
+      file: db/changelog/changes/18-keys-active-signing-index.sql
+  - include:
+      file: db/changelog/changes/18-subscription-overrides-unique.sql
+  - include:
+      file: db/changelog/changes/18-mfa-totp-replay.sql
+  - include:
+      file: db/changelog/changes/18-idempotency-replay-headers.sql
+  - include:
       file: db/changelog/changes/99-auth-password-reset.sql

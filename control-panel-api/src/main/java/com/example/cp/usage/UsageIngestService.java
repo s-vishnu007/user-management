@@ -5,6 +5,7 @@ import com.example.cp.common.Ids;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -107,58 +108,85 @@ public class UsageIngestService {
             return new IngestResult(0, subId);                                    // fully de-duplicated replay
         }
 
-        // 2. Enforce per-(feature, period) limits BEFORE writing; any breach throws 409 and the whole
-        //    @Transactional ingest rolls back (no event rows, consumed_value unchanged).
-        if (enforceLimit) {
-            Map<String, BigDecimal> addByBucket = new LinkedHashMap<>();
-            for (UsageEvent ue : toPersist) {
-                addByBucket.merge(ue.getFeatureKey() + "|" + monthStartUtc(ue.getOccurredAt()),
-                        ue.getQuantity(), BigDecimal::add);
-            }
-            for (UsageEvent ue : toPersist) {
-                OffsetDateTime period = monthStartUtc(ue.getOccurredAt());
-                BigDecimal add = addByBucket.remove(ue.getFeatureKey() + "|" + period);
-                if (add != null) {
-                    checkLimit(subId, ue.getFeatureKey(), period, add);
-                }
-            }
+        // 2. Persist the event rows, then accumulate consumption + enforce the per-(feature, period)
+        //    limit ATOMICALLY in the upsert. Aggregating per bucket first means one guarded UPDATE per
+        //    bucket: the WHERE makes "consumed + add <= limit" a single check-and-set with the row
+        //    locked, so two concurrent batches can no longer both pass a stale SELECT and overrun the
+        //    cap (the TOCTOU race the plain SELECT-then-upsert allowed).
+        //
+        //    The partial-unique dedup index (subscription_id, jti, event_id) is the authoritative
+        //    idempotency backstop behind the SELECT pre-check above: if a concurrent request slipped
+        //    the same eventId past that pre-check, the INSERT collides. Because Postgres aborts the
+        //    whole transaction on a constraint violation (no further statements can run on this
+        //    connection), we cannot re-query and partially re-ingest here — instead we treat the
+        //    collision as "already ingested by the concurrent winner" and return idempotently
+        //    (HTTP 202, zero newly-accepted) rather than surfacing a raw 500. The winning request
+        //    already persisted the rows and accumulated the quota, so no work is lost.
+        try {
+            eventRepo.saveAll(toPersist);
+            eventRepo.flush();
+        } catch (DataIntegrityViolationException dup) {
+            throw new DedupCollisionException(subId, dup);
         }
 
-        // 3. Persist and accumulate.
-        eventRepo.saveAll(toPersist);
+        Map<String, BigDecimal> addByBucket = new LinkedHashMap<>();
+        Map<String, UsageEvent> bucketSample = new LinkedHashMap<>();
         for (UsageEvent ue : toPersist) {
-            upsertQuota(subId, ue.getFeatureKey(), ue.getQuantity(), ue.getOccurredAt());
+            OffsetDateTime period = monthStartUtc(ue.getOccurredAt());
+            String bucket = ue.getFeatureKey() + "|" + period;
+            addByBucket.merge(bucket, ue.getQuantity(), BigDecimal::add);
+            bucketSample.putIfAbsent(bucket, ue);
+        }
+        for (Map.Entry<String, BigDecimal> e : addByBucket.entrySet()) {
+            UsageEvent sample = bucketSample.get(e.getKey());
+            upsertQuotaEnforcingLimit(subId, sample.getFeatureKey(), e.getValue(), sample.getOccurredAt());
         }
         return new IngestResult(toPersist.size(), subId);
     }
 
-    /** Rejects with 409 when applying {@code add} to a non-null limit would exceed it for the period. */
-    private void checkLimit(UUID subId, String featureKey, OffsetDateTime periodStart, BigDecimal add) {
-        List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT limit_value, consumed_value FROM usage_quotas "
-                        + "WHERE subscription_id = ? AND feature_key = ? AND period_start = ?",
-                subId, featureKey, periodStart);
-        if (rows.isEmpty() || rows.get(0).get("limit_value") == null) {
-            return;                                                               // no row / no limit configured
-        }
-        BigDecimal limit = new BigDecimal(rows.get(0).get("limit_value").toString());
-        Object consumedObj = rows.get(0).get("consumed_value");
-        BigDecimal consumed = consumedObj == null ? BigDecimal.ZERO : new BigDecimal(consumedObj.toString());
-        if (consumed.add(add).compareTo(limit) > 0) {
-            throw ApiException.conflict("Usage limit exceeded for feature '" + featureKey + "'");
+    /**
+     * Signals that the dedup unique index collided concurrently (the rows are already ingested by the
+     * winning request). Propagating it out of {@link #ingest(String, List)} rolls back the (now
+     * Postgres-aborted) transaction via the {@code @Transactional} proxy; the controller catches it
+     * and returns an idempotent zero-accepted response instead of a raw 500. No work is lost because
+     * the winning request already persisted the rows and accumulated the quota.
+     */
+    static final class DedupCollisionException extends RuntimeException {
+        final UUID subscriptionId;
+        DedupCollisionException(UUID subscriptionId, Throwable cause) {
+            super(cause);
+            this.subscriptionId = subscriptionId;
         }
     }
 
-    private void upsertQuota(UUID subId, String featureKey, BigDecimal qty, OffsetDateTime occurredAt) {
+    /**
+     * Atomic accumulate-with-limit. On a fresh period the row inserts ({@code limit_value} NULL = no
+     * cap). On conflict the consumed total is incremented ONLY when the row has no limit or the new
+     * total still fits; the row is locked for the duration of the UPDATE so the check and the set are
+     * indivisible. When {@code enforceLimit} is on and the guarded UPDATE matches zero rows, the limit
+     * would be exceeded -> 409, rolling back the whole {@code @Transactional} ingest (event rows and
+     * all). When enforcement is off, the WHERE guard is omitted so consumption always accumulates.
+     */
+    private void upsertQuotaEnforcingLimit(UUID subId, String featureKey, BigDecimal add, OffsetDateTime occurredAt) {
         OffsetDateTime periodStart = monthStartUtc(occurredAt);
         OffsetDateTime periodEnd = periodStart.plusMonths(1);
-        jdbc.update("""
+        String sql = """
                 INSERT INTO usage_quotas (subscription_id, feature_key, period_start, period_end, limit_value, consumed_value)
                 VALUES (?, ?, ?, ?, NULL, ?)
                 ON CONFLICT (subscription_id, feature_key, period_start)
                 DO UPDATE SET consumed_value = usage_quotas.consumed_value + EXCLUDED.consumed_value,
                               period_end = EXCLUDED.period_end
-                """, subId, featureKey, periodStart, periodEnd, qty);
+                """;
+        if (enforceLimit) {
+            sql += "WHERE usage_quotas.limit_value IS NULL "
+                    + "OR usage_quotas.consumed_value + EXCLUDED.consumed_value <= usage_quotas.limit_value";
+        }
+        int affected = jdbc.update(sql, subId, featureKey, periodStart, periodEnd, add);
+        // affected == 0 only when the row already existed and the limit guard excluded it (a fresh
+        // INSERT always reports 1). That is the over-limit case.
+        if (enforceLimit && affected == 0) {
+            throw ApiException.conflict("Usage limit exceeded for feature '" + featureKey + "'");
+        }
     }
 
     private static OffsetDateTime monthStartUtc(OffsetDateTime t) {
@@ -182,9 +210,8 @@ public class UsageIngestService {
         if (featureKey == null || featureKey.isBlank()) {
             return quotaRepo.findBySubscriptionId(subscriptionId);
         }
-        return quotaRepo.findBySubscriptionIdAndFeatureKey(subscriptionId, featureKey)
-                .map(List::of)
-                .orElse(List.of());
+        // Returns one row per period — a single-result query here threw after the 2nd month.
+        return quotaRepo.findBySubscriptionIdAndFeatureKey(subscriptionId, featureKey);
     }
 
     @Transactional(readOnly = true)

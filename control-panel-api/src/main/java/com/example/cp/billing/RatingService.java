@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
+import java.util.Currency;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,7 +37,11 @@ import java.util.UUID;
 @Service
 public class RatingService {
 
-    /** Decimal places to which line amounts and the total are rounded. */
+    /**
+     * Default decimal places for line amounts and the total when no currency is supplied (the common
+     * two-minor-digit case, e.g. USD/EUR). Currency-aware overloads round to the currency's actual
+     * minor-unit exponent instead (see {@link #scaleFor(String)}).
+     */
     public static final int SCALE = 2;
 
     /** Prefix marking a plan feature as a per-unit price rather than a metered usage feature. */
@@ -52,7 +57,8 @@ public class RatingService {
     }
 
     /**
-     * Rate the given per-feature consumed quantities against the plan's price book.
+     * Rate the given per-feature consumed quantities against the plan's price book, rounding to the
+     * default {@link #SCALE} (two decimals).
      *
      * @param planId           the plan whose features define the price book (may be {@code null} → all rates 0)
      * @param consumedByFeature map of metered {@code feature_key -> consumed_value}; null/negative values
@@ -60,16 +66,39 @@ public class RatingService {
      * @return the rated line items and total
      */
     public RatedInvoice rate(UUID planId, Map<String, BigDecimal> consumedByFeature) {
+        return rate(planId, consumedByFeature, null);
+    }
+
+    /**
+     * Rate the given per-feature consumed quantities against the plan's price book, rounding line amounts
+     * and the total to the currency's minor-unit exponent (P3) — e.g. 2 for USD/EUR, 0 for JPY/KRW, 3 for
+     * BHD/KWD. An unknown/blank currency falls back to {@link #SCALE}.
+     *
+     * @param currencyCode ISO-4217 code (e.g. {@code "USD"}); {@code null}/blank → default scale
+     */
+    public RatedInvoice rate(UUID planId, Map<String, BigDecimal> consumedByFeature, String currencyCode) {
         Map<String, BigDecimal> priceBook = planId == null ? Map.of() : loadPriceBook(planId);
-        return rateWithPriceBook(priceBook, consumedByFeature);
+        return rateWithPriceBook(priceBook, consumedByFeature, scaleFor(currencyCode));
     }
 
     /**
      * Rate against an explicit price book (per-unit rates keyed by metered feature key, plus an optional
-     * {@link #DEFAULT_PRICE_KEY}). Exposed primarily for deterministic unit testing of the rating math.
+     * {@link #DEFAULT_PRICE_KEY}), rounding to the default {@link #SCALE}. Exposed primarily for
+     * deterministic unit testing of the rating math.
      */
     public RatedInvoice rateWithPriceBook(Map<String, BigDecimal> priceBook,
                                           Map<String, BigDecimal> consumedByFeature) {
+        return rateWithPriceBook(priceBook, consumedByFeature, SCALE);
+    }
+
+    /**
+     * Rate against an explicit price book, rounding line amounts and the total to {@code scale} decimal
+     * places (the currency's minor-unit exponent). {@code unitAmount} is the raw configured rate and is
+     * NOT rescaled — only money amounts are rounded.
+     */
+    public RatedInvoice rateWithPriceBook(Map<String, BigDecimal> priceBook,
+                                          Map<String, BigDecimal> consumedByFeature,
+                                          int scale) {
         BigDecimal defaultRate = priceBook == null ? null : priceBook.get(DEFAULT_PRICE_KEY);
 
         // Deterministic ordering by feature key.
@@ -78,17 +107,34 @@ public class RatingService {
         features.sort(String::compareTo);
 
         List<RatedLine> lines = new ArrayList<>(features.size());
-        BigDecimal total = BigDecimal.ZERO.setScale(SCALE, RoundingMode.HALF_UP);
+        BigDecimal total = BigDecimal.ZERO.setScale(scale, RoundingMode.HALF_UP);
 
         for (String feature : features) {
             BigDecimal qty = normalizeQuantity(consumedByFeature.get(feature));
             BigDecimal rate = resolveRate(priceBook, defaultRate, feature);
-            BigDecimal amount = qty.multiply(rate).setScale(SCALE, RoundingMode.HALF_UP);
+            BigDecimal amount = qty.multiply(rate).setScale(scale, RoundingMode.HALF_UP);
             lines.add(new RatedLine(feature, qty, rate, amount,
                     feature + " usage (" + qty.toPlainString() + " @ " + rate.toPlainString() + ")"));
             total = total.add(amount);
         }
-        return new RatedInvoice(List.copyOf(lines), total.setScale(SCALE, RoundingMode.HALF_UP));
+        return new RatedInvoice(List.copyOf(lines), total.setScale(scale, RoundingMode.HALF_UP));
+    }
+
+    /**
+     * The number of decimal places to round money to for the given ISO-4217 currency — its minor-unit
+     * exponent (e.g. {@code USD}→2, {@code JPY}→0, {@code KWD}→3). Unknown or blank codes, and currencies
+     * with no defined minor unit (exponent {@code -1}, e.g. {@code XAU} gold), fall back to {@link #SCALE}.
+     */
+    public static int scaleFor(String currencyCode) {
+        if (currencyCode == null || currencyCode.isBlank()) {
+            return SCALE;
+        }
+        try {
+            int digits = Currency.getInstance(currencyCode.trim().toUpperCase()).getDefaultFractionDigits();
+            return digits >= 0 ? digits : SCALE;
+        } catch (IllegalArgumentException unknownCurrency) {
+            return SCALE;
+        }
     }
 
     /**

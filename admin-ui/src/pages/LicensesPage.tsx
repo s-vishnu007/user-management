@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { apiErrorMessage, licenses } from '@/lib/api';
+import { apiErrorMessage, licenses, orgs, subscriptions } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Button, Input, Select, StatusBadge } from '@/components/ui';
 import { DataTable, type Column } from '@/components/DataTable';
@@ -18,13 +18,36 @@ export function LicensesPage() {
   const [filter, setFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
 
-  const licsQ = useQuery({ queryKey: ['licenses'], queryFn: () => licenses.list() });
+  // The /licenses endpoint requires a subscriptionId (the tenant-leak fix), so a global
+  // unscoped list is no longer possible. The admin picks an org, then a subscription, and we
+  // list that subscription's licenses. (Flagged: a scoped backend aggregate endpoint would let
+  // us show a true cross-subscription view — see crossCuttingNotes.)
+  const [orgId, setOrgId] = useState('');
+  const [subId, setSubId] = useState('');
+
+  const orgsQ = useQuery({ queryKey: ['orgs'], queryFn: orgs.list });
+  const subsQ = useQuery({
+    queryKey: ['org', orgId, 'subscriptions'],
+    queryFn: () => subscriptions.listForOrg(orgId),
+    enabled: !!orgId,
+  });
+
+  // Reset the selected subscription whenever the org changes.
+  useEffect(() => {
+    setSubId('');
+  }, [orgId]);
+
+  const licsQ = useQuery({
+    queryKey: ['licenses', 'sub', subId],
+    queryFn: () => licenses.listForSubscription(subId),
+    enabled: !!subId,
+  });
 
   const data = useMemo(() => {
     const now = new Date();
     return (licsQ.data ?? []).filter((l) => {
       if (filter) {
-        const hay = `${l.jti} ${l.orgName ?? ''} ${l.planCode ?? ''}`.toLowerCase();
+        const hay = `${l.jti} ${l.kid ?? ''}`.toLowerCase();
         if (!hay.includes(filter.toLowerCase())) return false;
       }
       if (statusFilter === 'all') return true;
@@ -41,7 +64,7 @@ export function LicensesPage() {
     mutationFn: ({ jti, reason }: { jti: string; reason?: string }) =>
       licenses.revoke(jti, reason),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['licenses'] });
+      qc.invalidateQueries({ queryKey: ['licenses', 'sub', subId] });
       toast.success('License revoked');
     },
     onError: (e) => toast.error(apiErrorMessage(e)),
@@ -61,16 +84,6 @@ export function LicensesPage() {
       key: 'jti',
       header: 'JTI',
       render: (l) => <code className="text-xs">{l.jti.slice(0, 18)}…</code>,
-    },
-    {
-      key: 'org',
-      header: 'Organization',
-      render: (l) => l.orgName ?? '—',
-    },
-    {
-      key: 'plan',
-      header: 'Plan',
-      render: (l) => (l.planCode ? <code className="text-xs">{l.planCode}</code> : '—'),
     },
     { key: 'kid', header: 'Key', render: (l) => <code className="text-xs">{l.kid}</code> },
     {
@@ -106,9 +119,12 @@ export function LicensesPage() {
               Subscription
             </Button>
           </Link>
-          <Button variant="ghost" size="sm" onClick={() => onDownload(l.jti)}>
-            Download
-          </Button>
+          {/* Revoked licenses cannot be downloaded (the backend rejects them), so hide the action. */}
+          {!l.revokedAt && (
+            <Button variant="ghost" size="sm" onClick={() => onDownload(l.jti)}>
+              Download
+            </Button>
+          )}
           {!l.revokedAt && (
             <PermissionGate permission="license.revoke">
               <Button
@@ -128,22 +144,56 @@ export function LicensesPage() {
     },
   ];
 
+  const emptyMessage = !orgId
+    ? 'Select an organization to begin.'
+    : !subId
+      ? 'Select a subscription to view its licenses.'
+      : licsQ.isError
+        ? apiErrorMessage(licsQ.error)
+        : 'No licenses found for this subscription.';
+
   return (
     <div>
       <PageHeader
         title="Licenses"
-        description="All issued license tokens across all subscriptions."
+        description="Issued license tokens, scoped to a subscription."
       />
       <DataTable
-        rows={data}
+        rows={subId ? data : []}
         columns={columns}
         rowKey={(l) => l.jti}
-        loading={licsQ.isLoading}
-        empty={licsQ.isError ? apiErrorMessage(licsQ.error) : 'No licenses found.'}
+        loading={!!subId && licsQ.isLoading}
+        empty={emptyMessage}
         toolbar={
           <div className="flex w-full flex-wrap items-center gap-2">
+            <Select
+              value={orgId}
+              onChange={(e) => setOrgId(e.target.value)}
+              className="max-w-xs"
+              disabled={orgsQ.isLoading}
+            >
+              <option value="">Select organization…</option>
+              {(orgsQ.data ?? []).map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.name} ({o.slug})
+                </option>
+              ))}
+            </Select>
+            <Select
+              value={subId}
+              onChange={(e) => setSubId(e.target.value)}
+              className="max-w-xs"
+              disabled={!orgId || subsQ.isLoading}
+            >
+              <option value="">Select subscription…</option>
+              {(subsQ.data ?? []).map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.planName ?? s.planCode ?? s.planId} · {s.status}
+                </option>
+              ))}
+            </Select>
             <Input
-              placeholder="Search by JTI, org, plan"
+              placeholder="Search by JTI or key"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
               className="max-w-sm"

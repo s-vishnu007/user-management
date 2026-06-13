@@ -16,22 +16,22 @@ import static org.mockito.Mockito.when;
 
 /**
  * Test fixture that stubs {@link JdbcTemplate#query(String, RowMapper)} so the production
- * {@link OutboxPublisher}'s real (private) {@code ClaimedRow} {@link RowMapper} is exercised against
- * a synthetic {@link ResultSet}. This keeps the publisher's mapping logic under test without exposing
- * its private record, and without a database.
+ * {@link OutboxDeliveryScheduler}'s real (private) {@code ClaimedRow} {@link RowMapper} is exercised
+ * against a synthetic {@link ResultSet}. This keeps the scheduler's mapping logic under test without
+ * exposing its private record, and without a database.
  */
-final class OutboxPublisherTestRows {
+final class OutboxDeliverySchedulerTestRows {
 
-    private OutboxPublisherTestRows() {
+    private OutboxDeliverySchedulerTestRows() {
     }
 
-    /** A claimed outbox row as the publisher's SELECT would surface it. */
+    /** A claimed outbox row as the scheduler's SELECT would surface it. */
     record Row(UUID id, String eventType, int attempts) {
     }
 
     /**
      * Arranges the mock {@code jdbc} so that the claim query returns the given rows by running the
-     * publisher's own {@link RowMapper} over a stubbed {@link ResultSet} per row.
+     * scheduler's own {@link RowMapper} over a stubbed {@link ResultSet} per row.
      */
     @SuppressWarnings("unchecked")
     static void stub(JdbcTemplate jdbc, Row... rows) {

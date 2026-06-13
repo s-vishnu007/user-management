@@ -1,6 +1,9 @@
 services:
   postgres:
-    image: postgres:16
+    # Pinned to a patch tag (not the mutable :16) so a rebuild cannot silently pull a different
+    # minor and so the running image is reproducible.
+    image: postgres:16.4
+    restart: unless-stopped
     environment:
       POSTGRES_DB: cp
       POSTGRES_USER: ${POSTGRES_USER:-cp}
@@ -10,26 +13,53 @@ services:
     # 127.0.0.1 only, e.g.  ports: ["127.0.0.1:5432:5432"].
     volumes:
       - pg-data:/var/lib/postgresql/data
+    networks:
+      - backend
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cp} -d cp"]
       interval: 5s
       timeout: 5s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
 
   redis:
-    image: redis:7
+    # Pinned patch tag (see postgres note).
+    image: redis:7.4
+    restart: unless-stopped
+    # Redis backs session-revocation (jti denylist) and the brute-force/lockout counters, so it must
+    # NOT run unauthenticated on a shared network: any container on it could FLUSHALL to reset the
+    # lockout counters or revive logged-out tokens. Require a password from the same env pattern as
+    # POSTGRES_PASSWORD. The app authenticates with the same value via spring.data.redis.password.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"]
+    environment:
+      # Exposed inside the container so the healthcheck can AUTH at runtime (see the $$ escape below).
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
     # Host port publishing intentionally removed: redis is reachable only on the
     # compose network as redis:6379. For local debugging, bind 127.0.0.1 only.
+    networks:
+      - backend
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # Authenticated ping: the AUTH must succeed for the container to report healthy. The doubled $$
+      # escapes compose interpolation so $REDIS_PASSWORD is expanded by the container shell at runtime.
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
       interval: 5s
       timeout: 5s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
 
   control-panel-api:
     build:
       context: .
       dockerfile: control-panel-api/Dockerfile
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -40,29 +70,80 @@ services:
       DB_USER: ${POSTGRES_USER:-cp}
       DB_PASS: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       REDIS_URL: redis://redis:6379
+      # Same secret the redis service requires; sent as spring.data.redis.password.
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+      # Pin the JVM/container timezone to UTC. Some host JVMs resolve the legacy Olson alias
+      # "Asia/Calcutta", which the PostgreSQL server rejects as an invalid TimeZone on connect,
+      # aborting startup. UTC is the right deterministic default for a server process anyway.
+      TZ: UTC
+      JAVA_TOOL_OPTIONS: -Duser.timezone=UTC
       APP_KEY_ENC_MASTER: ${APP_KEY_ENC_MASTER:?APP_KEY_ENC_MASTER must be set}
       APP_AUTH_SESSION_SECRET: ${APP_AUTH_SESSION_SECRET:?APP_AUTH_SESSION_SECRET must be set (>=32 chars)}
       APP_CORS_ALLOWED_ORIGINS: ${APP_CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+    networks:
+      - backend
     ports:
       - "8080:8080"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1024M
 
   sample-docker-app:
     build:
       context: .
       dockerfile: sample-docker-app/Dockerfile
+    restart: unless-stopped
+    networks:
+      - backend
     ports:
       - "9090:9090"
     volumes:
-      - ./samples/license.lic:/etc/app/license.lic:ro
+      # Bind a single FILE, not a directory. The previous short-syntax "./samples/license.lic:..."
+      # mount caused Docker to auto-create a DIRECTORY named license.lic on the host when the file was
+      # absent, which then mounts as a directory inside the container and breaks license loading. The
+      # long-syntax bind with create_host_path:false makes the intent explicit and FAILS FAST when the
+      # source file is missing instead of silently creating a directory. The license.lic file must
+      # exist on the host first (generate one via the control panel's license issue/download flow).
+      - type: bind
+        source: ./samples/license.lic
+        target: /etc/app/license.lic
+        read_only: true
+        bind:
+          create_host_path: false
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
 
   admin-ui:
-    image: node:20-alpine
+    # Pinned patch tag (node:20-alpine is mutable; this also documents the runtime version).
+    image: node:20.18-alpine
+    restart: unless-stopped
     working_dir: /app
     volumes:
       - ./admin-ui:/app
     command: sh -c "npm install && npm run dev -- --host"
+    # Isolated on its own network: this is a dev container that runs `npm install` (arbitrary
+    # third-party install scripts) and must NOT be able to reach postgres/redis on the backend
+    # network. It only needs to serve the Vite dev server to the host.
+    networks:
+      - frontend
     ports:
       - "5173:5173"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+networks:
+  backend:
+    driver: bridge
+  frontend:
+    driver: bridge
 
 volumes:
   pg-data:

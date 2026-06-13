@@ -63,11 +63,12 @@ export function PlanEditPage() {
         defaultTtlDays: planQ.data.defaultTtlDays ?? undefined,
       });
       setSelectedPerms(new Set(planQ.data.permissions ?? []));
+      // features is a JSON object (Map<String,Object>) keyed by feature key, not an array.
       setFeatures(
-        (planQ.data.features ?? []).map((f) => ({
-          key: f.key,
-          type: inferType(f.value),
-          value: f.value,
+        Object.entries(planQ.data.features ?? {}).map(([key, value]) => ({
+          key,
+          type: inferType(value),
+          value: value as string | number | boolean,
         })),
       );
     }
@@ -105,7 +106,14 @@ export function PlanEditPage() {
   };
 
   const saveMeta = useMutation({
-    mutationFn: (v: MetaValues) => plans.update(planId, v),
+    // The PATCH endpoint (UpdatePlanRequest) accepts name/description/tier/defaultTtlDays/active —
+    // NOT code (the plan code is immutable post-creation), so we only send the editable fields.
+    mutationFn: (v: MetaValues) =>
+      plans.update(planId, {
+        name: v.name,
+        description: v.description,
+        defaultTtlDays: v.defaultTtlDays,
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['plan', planId] });
       toast.success('Plan saved');
@@ -123,18 +131,19 @@ export function PlanEditPage() {
   });
 
   const saveFeatures = useMutation({
-    mutationFn: () =>
-      plans.setFeatures(
-        planId,
-        features
-          .filter((f) => f.key.trim() !== '')
-          .map((f) => {
-            let value: PlanFeature['value'] = f.value;
-            if (f.type === 'boolean') value = String(f.value) === 'true' || f.value === true;
-            else if (f.type === 'number') value = Number(f.value);
-            return { key: f.key.trim(), value };
-          }),
-      ),
+    // The endpoint expects a JSON object (Map<String,Object>) keyed by feature key.
+    mutationFn: () => {
+      const obj: Record<string, PlanFeature['value']> = {};
+      for (const f of features) {
+        const key = f.key.trim();
+        if (key === '') continue;
+        let value: PlanFeature['value'] = f.value;
+        if (f.type === 'boolean') value = String(f.value) === 'true' || f.value === true;
+        else if (f.type === 'number') value = Number(f.value);
+        obj[key] = value;
+      }
+      return plans.setFeatures(planId, obj);
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['plan', planId] });
       toast.success('Features updated');

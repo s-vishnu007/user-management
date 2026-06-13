@@ -24,6 +24,16 @@ import java.util.Map;
 @Component
 public class LicenseClaimsBuilder {
 
+    /**
+     * Maximum license TTL in days (~100 years). Clamps {@code ttlDays}/{@code defaultTtlDays} so a
+     * huge value cannot overflow {@link OffsetDateTime#plusDays(long)} into a {@code DateTimeException}
+     * surfaced as a raw 500 (audit P3). 100 years is far beyond any legitimate license lifetime.
+     */
+    static final int MAX_TTL_DAYS = 36_500;
+
+    /** License wire-contract claim version. Bumped if the embedded claim shape changes. */
+    static final int CLAIM_VERSION = 1;
+
     private final OrganizationRepository orgRepo;
     private final PlanRepository planRepo;
     private final PlanService planService;
@@ -59,10 +69,10 @@ public class LicenseClaimsBuilder {
         OffsetDateTime now = OffsetDateTime.now();
         OffsetDateTime exp;
         if (ttlDaysOverride != null && ttlDaysOverride > 0) {
-            exp = now.plusDays(ttlDaysOverride);
+            exp = now.plusDays(clampTtlDays(ttlDaysOverride));
         } else {
             // honour subscription end if it's sooner than plan default
-            OffsetDateTime planDefault = now.plusDays(plan.getDefaultTtlDays());
+            OffsetDateTime planDefault = now.plusDays(clampTtlDays(plan.getDefaultTtlDays()));
             exp = sub.getEndsAt() != null && sub.getEndsAt().isBefore(planDefault)
                     ? sub.getEndsAt()
                     : planDefault;
@@ -94,9 +104,22 @@ public class LicenseClaimsBuilder {
                 .claim("features", ent.features())
                 .claim("seats", sub.getSeats())
                 .claim("customer", customer)
-                .claim("version", 1);
+                .claim("version", CLAIM_VERSION);
 
         return new BuiltClaims(jti, now, exp, plan.getCode(), org.getName(), org.getSlug(), audience, b.build());
+    }
+
+    /**
+     * Clamps a requested TTL (days) to {@code [1, MAX_TTL_DAYS]} so a pathological value cannot
+     * overflow {@link OffsetDateTime#plusDays(long)} into a 500 (audit P3). A non-positive value
+     * falls back to 1 day (the caller already guards {@code ttlDaysOverride > 0}; this also protects
+     * a misconfigured plan {@code defaultTtlDays}).
+     */
+    private static int clampTtlDays(int requested) {
+        if (requested < 1) {
+            return 1;
+        }
+        return Math.min(requested, MAX_TTL_DAYS);
     }
 
     private static String buildJti() {

@@ -1,9 +1,11 @@
 package com.example.cp.licenses;
 
 import com.example.cp.common.ApiException;
+import com.example.cp.common.PageRequestParams;
 import com.example.cp.common.SecurityUtils;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -15,7 +17,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,20 +30,20 @@ public class LicenseController {
     private final LicenseFileBuilder fileBuilder;
     private final LicenseRevocationService revocationService;
     private final LicenseTokenRepository tokenRepo;
-    private final LicenseEnvelopeCache envelopeCache;
+    private final LicenseArtifactRepository artifactRepo;
     private final ActivationService activationService;
 
     public LicenseController(LicenseIssuer issuer,
                              LicenseFileBuilder fileBuilder,
                              LicenseRevocationService revocationService,
                              LicenseTokenRepository tokenRepo,
-                             LicenseEnvelopeCache envelopeCache,
+                             LicenseArtifactRepository artifactRepo,
                              ActivationService activationService) {
         this.issuer = issuer;
         this.fileBuilder = fileBuilder;
         this.revocationService = revocationService;
         this.tokenRepo = tokenRepo;
-        this.envelopeCache = envelopeCache;
+        this.artifactRepo = artifactRepo;
         this.activationService = activationService;
     }
 
@@ -56,8 +57,8 @@ public class LicenseController {
         LicenseIssuer.IssuedLicense issued = trial
                 ? issuer.issueTrial(subId, ttl, audience)
                 : issuer.issue(subId, ttl, audience);
-        // Cache the raw JWT so /download returns the same artifact within the cache TTL.
-        envelopeCache.put(issued.jti(), issued);
+        // The exact signed artifact is persisted by the issuer (license_artifacts) so /download is a
+        // pure read of the stored JWT — no in-memory cache and no re-issue on miss.
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("jti", issued.jti());
@@ -74,21 +75,22 @@ public class LicenseController {
     @GetMapping("/licenses/{jti}/download")
     @PreAuthorize("@tenantAccess.canReadLicenseByJti(#jti)")
     public ResponseEntity<byte[]> download(@PathVariable String jti) {
+        // PURE READ (audit P1-4): a GET must never have write side-effects. The signed artifact was
+        // persisted at issue time, so we simply return it (or 404/410) — we never call issuer.issue()
+        // here. This closes the path where a read-only principal could mint a brand-new license (new
+        // jti / row / outbox event, zero audit) by downloading a jti that had aged out of a cache.
         LicenseToken token = tokenRepo.findByJti(jti)
                 .orElseThrow(() -> ApiException.notFound("License not found"));
         if (token.getStatus() == LicenseToken.Status.REVOKED) {
-            throw ApiException.badRequest("License is revoked");
+            // 410 Gone: the resource existed but is no longer downloadable.
+            throw new ApiException(HttpStatus.GONE, "Gone", "License is revoked");
         }
 
-        // Serve the exact JWT from the in-memory issuance cache when available.
-        // On cache miss (process restart, etc) we re-issue a fresh license bound to
-        // the same subscription so the caller still receives a valid envelope; the
-        // returned jti will then be a new one and a new license_tokens row exists.
-        LicenseIssuer.IssuedLicense issued = envelopeCache.get(jti).orElseGet(() ->
-                issuer.issue(token.getSubscriptionId(),
-                        computeRemainingDays(token.getExpiresAt()),
-                        null)
-        );
+        LicenseArtifact artifact = artifactRepo.findByJti(jti)
+                .orElseThrow(() -> new ApiException(HttpStatus.GONE, "Gone",
+                        "No downloadable artifact for this license"));
+        LicenseIssuer.IssuedLicense issued = artifact.toIssuedLicense();
+
         byte[] body = fileBuilder.buildEnvelopeBytes(issued, null);
         String filename = fileBuilder.suggestedFilename(issued);
 
@@ -112,15 +114,27 @@ public class LicenseController {
     @GetMapping("/licenses")
     @PreAuthorize("@tenantAccess.canReadSubscription(#subscriptionId)")
     public List<LicenseDto> list(@RequestParam UUID subscriptionId,
-                                 @RequestParam(required = false) String status) {
+                                 @RequestParam(required = false) String status,
+                                 @RequestParam(required = false) Integer page,
+                                 @RequestParam(required = false) Integer size) {
         // subscriptionId is REQUIRED: an unscoped, cross-org license enumeration is a tenant leak.
         // The caller is authorized against the subscription's owning org by @tenantAccess above.
+        // Server-side page/size caps (PageRequestParams.MAX_SIZE) bound the result set so a single
+        // subscription cannot return an unbounded license list (P3). Ordering is fixed by the query.
+        org.springframework.data.domain.Pageable pageable =
+                PageRequestParams.of(page, size, null);
         List<LicenseToken> rows;
         if (status != null) {
+            LicenseToken.Status parsed;
+            try {
+                parsed = LicenseToken.Status.valueOf(status.toUpperCase());
+            } catch (IllegalArgumentException e) {
+                throw ApiException.badRequest("Invalid status: " + status);
+            }
             rows = tokenRepo.findBySubscriptionIdAndStatusOrderByIssuedAtDesc(
-                    subscriptionId, LicenseToken.Status.valueOf(status.toUpperCase()));
+                    subscriptionId, parsed, pageable);
         } else {
-            rows = tokenRepo.findBySubscriptionIdOrderByIssuedAtDesc(subscriptionId);
+            rows = tokenRepo.findBySubscriptionIdOrderByIssuedAtDesc(subscriptionId, pageable);
         }
         return rows.stream().map(LicenseDto::from).toList();
     }
@@ -131,12 +145,6 @@ public class LicenseController {
         LicenseToken token = tokenRepo.findByJti(jti)
                 .orElseThrow(() -> ApiException.notFound("License not found"));
         return LicenseDto.from(token, activationService.activeSeatCount(jti));
-    }
-
-    private static Integer computeRemainingDays(OffsetDateTime expiresAt) {
-        if (expiresAt == null) return null;
-        long days = java.time.Duration.between(OffsetDateTime.now(), expiresAt).toDays();
-        return (int) Math.max(1, days);
     }
 
     public record IssueRequest(Integer ttlDays, List<String> audience, String notes, Boolean trial) {}

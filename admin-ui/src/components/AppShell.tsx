@@ -76,7 +76,7 @@ export function AppShell() {
           <div className="md:hidden font-semibold text-slate-800">Control Panel</div>
           <div className="ml-auto flex items-center gap-3">
             <span className="hidden text-sm text-slate-500 md:inline">
-              {user?.displayName ?? user?.email}
+              {user?.fullName ?? user?.email}
             </span>
             <Button variant="ghost" size="sm" className="md:hidden" onClick={onLogout}>
               Sign out

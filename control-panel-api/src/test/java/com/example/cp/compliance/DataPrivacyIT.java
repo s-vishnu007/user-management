@@ -105,16 +105,20 @@ class DataPrivacyIT extends AbstractIntegrationTest {
         User admin = seedUser("eraser-" + rnd() + "@example.com", "Eraser Admin", true);
         User subject = seedUser("erasee-" + rnd() + "@example.com", "Erasee Person", false);
 
-        // Seed an audit row authored by the subject (the trail we must RETAIN). audit_log is immutable
-        // (append-only, tamper-evident: a DB trigger blocks UPDATE/DELETE), so erasure cannot and must
-        // not mutate it. Pseudonymisation comes from redacting the users row the actor UUID points at,
-        // plus data-minimisation: audit payloads carry the actor UUID and non-PII fields, never the raw
-        // email. We seed a PII-free payload to reflect that policy.
-        auditWriter.record(subject.getId(), null, "user.updated", "user",
-                subject.getId().toString(), Map.of("field", "fullName"), "203.0.113.7");
+        // Seed an audit row authored by the subject carrying RAW PII in the payload (email) and a raw
+        // client IP — exactly the shape SCIM's provisioned-event writes. The trail ROW must be RETAINED
+        // (audit_log is append-only/tamper-evident: the DB trigger still blocks DELETE and arbitrary
+        // UPDATE), but erasure MUST scrub the PII it carries for this subject.
+        auditWriter.record(subject.getId(), null, "scim.user.provisioned", "scim_user_mapping",
+                subject.getId().toString(), Map.of("email", subject.getEmail()), "203.0.113.7");
 
         long auditBefore = countAuditForActor(subject.getId());
         assertThat(auditBefore).isGreaterThanOrEqualTo(1);
+        // Precondition: the raw email IS present in the trail before erasure.
+        Integer leakingBefore = jdbc.queryForObject(
+                "SELECT count(*) FROM audit_log WHERE actor_user_id = ? AND payload_json::text LIKE '%erasee-%'",
+                Integer.class, subject.getId());
+        assertThat(leakingBefore).isGreaterThanOrEqualTo(1);
 
         // Non-super-admin cannot erase.
         User nobody = seedUser("nobody-" + rnd() + "@example.com", "Nobody", false);
@@ -142,14 +146,25 @@ class DataPrivacyIT extends AbstractIntegrationTest {
         // Sessions revoked: token_version bumped.
         assertThat(erased.getTokenVersion()).isGreaterThanOrEqualTo(1L);
 
-        // Audit trail RETAINED unmodified (immutable) — rows still exist for the actor — and carries no
-        // direct PII, so nothing leaks post-erasure (the actor UUID now resolves to a redacted users row).
+        // Audit trail RETAINED: the rows still exist for the actor (count not reduced) and the actor
+        // UUID/action/timestamp are intact, but the PII they carried is now scrubbed — no raw email
+        // remains in payload_json and the client IP is nulled.
         long auditAfter = countAuditForActor(subject.getId());
         assertThat(auditAfter).isGreaterThanOrEqualTo(auditBefore);
         Integer leaking = jdbc.queryForObject(
                 "SELECT count(*) FROM audit_log WHERE actor_user_id = ? AND payload_json::text LIKE '%erasee-%'",
                 Integer.class, subject.getId());
         assertThat(leaking).isZero();
+        Integer withIp = jdbc.queryForObject(
+                "SELECT count(*) FROM audit_log WHERE actor_user_id = ? AND ip_address IS NOT NULL",
+                Integer.class, subject.getId());
+        assertThat(withIp).isZero();
+        // The redaction marker is present and identity columns are intact.
+        Integer redacted = jdbc.queryForObject(
+                "SELECT count(*) FROM audit_log WHERE actor_user_id = ? "
+                        + "AND payload_json::text LIKE '%gdpr_erasure%' AND action = 'scim.user.provisioned'",
+                Integer.class, subject.getId());
+        assertThat(redacted).isGreaterThanOrEqualTo(1);
 
         // An erasure_log ledger row was written for the subject.
         var ledger = erasureLogRepository

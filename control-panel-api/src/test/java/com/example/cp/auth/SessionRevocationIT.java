@@ -3,12 +3,14 @@ package com.example.cp.auth;
 import com.example.cp.support.AbstractIntegrationTest;
 import com.example.cp.users.User;
 import com.example.cp.users.UserService;
+import jakarta.servlet.http.Cookie;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 
 import static org.hamcrest.Matchers.is;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.cookie;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -125,6 +127,42 @@ class SessionRevocationIT extends AbstractIntegrationTest {
                         .contentType("application/json")
                         .content(loginJson(user.getEmail(), DEFAULT_PASSWORD)))
                 .andExpect(status().isUnauthorized());
+    }
+
+    /**
+     * P1-12: logout must work for a cookie/SSO session (the only credential a post-SSO browser holds).
+     * Presenting the session token ONLY in the {@code cp_session} cookie must denylist its jti AND
+     * clear the cookie (Set-Cookie cp_session ...; Max-Age=0), so the cookie can no longer authenticate.
+     */
+    @Test
+    void logout_viaCookie_denylistsToken_andClearsTheCookie() throws Exception {
+        User user = seedUser("cookie-logout-" + rnd() + "@example.com", "Cookie Logout User", false);
+        String token = loginAndGetToken(user.getEmail(), DEFAULT_PASSWORD);
+
+        // The cp_session cookie alone authenticates a protected call.
+        mockMvc.perform(get("/api/v1/users/{id}", user.getId())
+                        .cookie(new Cookie("cp_session", token)))
+                .andExpect(status().isOk());
+
+        // Logout presenting ONLY the cookie: 204, denylists the jti, and emits an expiring cookie.
+        mockMvc.perform(post("/api/v1/auth/logout")
+                        .cookie(new Cookie("cp_session", token)))
+                .andExpect(status().isNoContent())
+                .andExpect(cookie().value("cp_session", ""))
+                .andExpect(cookie().maxAge("cp_session", 0));
+
+        // The same cookie is now rejected on a protected endpoint (the jti was denylisted).
+        mockMvc.perform(get("/api/v1/users/{id}", user.getId())
+                        .cookie(new Cookie("cp_session", token)))
+                .andExpect(status().isUnauthorized());
+    }
+
+    /** Logout with neither a Bearer header nor a cookie is still an idempotent 204 that clears the cookie. */
+    @Test
+    void logout_withNoCredential_is204_andStillClearsCookie() throws Exception {
+        mockMvc.perform(post("/api/v1/auth/logout"))
+                .andExpect(status().isNoContent())
+                .andExpect(cookie().maxAge("cp_session", 0));
     }
 
     private String loginJson(String email, String password) throws Exception {

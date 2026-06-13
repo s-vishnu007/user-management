@@ -12,7 +12,11 @@ import com.nimbusds.jose.util.Base64URL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.event.EventListener;
+import org.springframework.core.annotation.Order;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -29,9 +33,11 @@ import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 @Service
 public class KeyService {
@@ -41,26 +47,122 @@ public class KeyService {
     private static final String ALGORITHM = "Ed25519";
     private static final int RETENTION_MONTHS = 18;
 
+    /**
+     * Every {@code (table, column)} that stores a {@link KeyEncryptor} AES-GCM blob. KEK rotation
+     * ({@link #rotateKek()}) re-encrypts EVERY one of these under the active KEK, and the startup
+     * drop-guard ({@link #assertNoOrphanedKekReferences()}) scans all of them to refuse a config that
+     * would leave any blob undecryptable. A single KEK protects all four categories, so dropping the
+     * old KEK after rotating only {@code signing_keys} would permanently orphan MFA/webhook/SSO
+     * secrets — this registry is the single source of truth that keeps the four in lock-step.
+     *
+     * <p>The other packages' columns are touched GENERICALLY via native SQL (no cross-package Java
+     * dependency); the column names are validated against the live schema by the audit/verifier.
+     */
+    static final List<EncryptedColumn> ENCRYPTED_COLUMNS = List.of(
+            new EncryptedColumn("signing_keys", "id", "private_key_encrypted", false),
+            new EncryptedColumn("user_mfa", "user_id", "secret_enc", false),
+            new EncryptedColumn("webhook_subscriptions", "id", "secret_enc", false),
+            new EncryptedColumn("sso_providers", "id", "client_secret_enc", true));
+
+    /** A KeyEncryptor-encrypted column: its table, primary-key column, blob column, and nullability. */
+    record EncryptedColumn(String table, String pkColumn, String blobColumn, boolean nullable) {}
+
     private final SigningKeyRepository repo;
     private final KeyEncryptor encryptor;
     private final OutboxPublisher outbox;
+    private final JdbcTemplate jdbc;
+    private final KeyService self;
 
-    public KeyService(SigningKeyRepository repo, KeyEncryptor encryptor, OutboxPublisher outbox) {
+    public KeyService(SigningKeyRepository repo, KeyEncryptor encryptor, OutboxPublisher outbox,
+                      JdbcTemplate jdbc, @Lazy KeyService self) {
         this.repo = repo;
         this.encryptor = encryptor;
         this.outbox = outbox;
+        this.jdbc = jdbc;
+        this.self = self;
     }
 
+    /**
+     * Bootstrap the initial ACTIVE signing key if none exists. Routed through the self-proxy so the
+     * inner {@link #generateNewActiveKey()} runs inside its own transaction (a direct call from this
+     * {@code @EventListener} would self-invoke and bypass the {@code @Transactional} boundary, so the
+     * retire-then-insert would not be atomic and the new partial unique index could surface a bare
+     * constraint violation across racing instances rather than a clean retry).
+     */
     @EventListener(ApplicationReadyEvent.class)
+    @Order(0)
     public void bootstrap() {
         try {
             if (repo.findFirstByStatusOrderByCreatedAtDesc(SigningKey.Status.ACTIVE).isEmpty()) {
                 log.info("No ACTIVE signing key found — generating initial Ed25519 key");
-                generateNewActiveKey();
+                self.generateNewActiveKey();
             }
+        } catch (DataIntegrityViolationException e) {
+            // A concurrent bootstrap on another instance won the race and inserted the single ACTIVE
+            // key first; the partial unique index ux_signing_keys_single_active rejected ours. That is
+            // the desired outcome (exactly one ACTIVE key), so treat it as success.
+            log.info("Signing key bootstrap: another instance generated the initial ACTIVE key first");
         } catch (Exception e) {
             log.warn("Signing key bootstrap deferred: {}", e.getMessage());
         }
+    }
+
+    /**
+     * Startup guard (P1-6): refuse to run with a KEK configuration that has dropped a KEK still
+     * referenced by any stored blob. Scans every {@link #ENCRYPTED_COLUMNS} entry and verifies the
+     * KEK id embedded in each blob is still configured in {@link KeyEncryptor}. If any blob references
+     * a now-missing KEK the application fails fast (rather than silently throwing the first time that
+     * secret is needed — at MFA login, webhook delivery, or SSO). Operators must keep the old KEK
+     * configured until {@link #rotateKek()} has re-wrapped every column under the new active KEK.
+     *
+     * <p>Runs after {@link #bootstrap()} (lower {@code @Order} value runs first) so the freshly
+     * generated bootstrap key — written under the active KEK — is included in the scan.
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    @Order(100)
+    public void assertNoOrphanedKekReferences() {
+        Set<String> configured = encryptor.configuredKekIds();
+        List<String> orphans = new ArrayList<>();
+        for (EncryptedColumn col : ENCRYPTED_COLUMNS) {
+            Set<String> referenced = referencedKekIds(col);
+            for (String kekId : referenced) {
+                if (!configured.contains(kekId)) {
+                    orphans.add(col.table() + "." + col.blobColumn() + " -> KEK '" + kekId + "'");
+                }
+            }
+        }
+        if (!orphans.isEmpty()) {
+            throw new IllegalStateException(
+                    "Refusing to start: stored encrypted blobs reference KEK id(s) that are no longer "
+                            + "configured in app.signing.master-keys, so they can never be decrypted. Re-add the "
+                            + "missing KEK(s) and run KEK rotation (POST /api/v1/admin/keys/rotate-kek) before "
+                            + "removing them. Orphaned references: " + orphans);
+        }
+        log.info("KEK drop-guard OK: every encrypted blob across {} column(s) references a configured KEK "
+                + "(configured KEKs: {})", ENCRYPTED_COLUMNS.size(), configured);
+    }
+
+    /** The distinct KEK ids referenced by the (non-null) blobs in one encrypted column. */
+    private Set<String> referencedKekIds(EncryptedColumn col) {
+        String sql = "SELECT " + col.blobColumn() + " FROM " + col.table()
+                + " WHERE " + col.blobColumn() + " IS NOT NULL";
+        List<byte[]> blobs = jdbc.query(sql, (rs, rowNum) -> rs.getBytes(1));
+        Set<String> ids = new LinkedHashSet<>();
+        for (byte[] blob : blobs) {
+            if (blob == null || blob.length == 0) {
+                continue;
+            }
+            try {
+                ids.add(encryptor.referencedKekId(blob));
+            } catch (RuntimeException e) {
+                // A too-short/garbage blob is a separate data-corruption issue, not a dropped-KEK
+                // problem; the drop-guard only cares about which KEKs are referenced, so skip it here
+                // (it will fail loudly at actual decrypt time if/when that secret is needed).
+                log.warn("Skipping unparseable blob in {}.{} during KEK drop-guard scan: {}",
+                        col.table(), col.blobColumn(), e.getMessage());
+            }
+        }
+        return ids;
     }
 
     @Transactional
@@ -75,12 +177,22 @@ public class KeyService {
             String pem = toPublicKeyPem(pub);
             byte[] encryptedPriv = encryptor.encrypt(priv.getEncoded());
 
-            // Retire any existing ACTIVE keys
+            // Retire any existing ACTIVE keys, then FLUSH the retire UPDATEs before inserting the new
+            // ACTIVE key. Hibernate's default action order executes INSERTs before UPDATEs within a
+            // flush, so without this explicit flush the new ACTIVE row would hit the database while the
+            // previous ACTIVE row is still ACTIVE — violating the partial unique index
+            // ux_signing_keys_single_active. Flushing the retires first guarantees at most one ACTIVE
+            // row is ever present mid-transaction.
             OffsetDateTime now = OffsetDateTime.now();
+            boolean retiredAny = false;
             for (SigningKey existing : repo.findByStatus(SigningKey.Status.ACTIVE)) {
                 existing.setStatus(SigningKey.Status.RETIRED);
                 existing.setRetiredAt(now);
                 repo.save(existing);
+                retiredAny = true;
+            }
+            if (retiredAny) {
+                repo.flush();
             }
 
             SigningKey k = SigningKey.builder()
@@ -167,24 +279,30 @@ public class KeyService {
     }
 
     /**
-     * Re-encrypts every signing key's private material under the currently-active key-encryption-key
-     * (KEK). Walks {@code signing_keys}, decrypts each {@code private_key_encrypted} blob (transparently
-     * handling legacy unversioned blobs and blobs under older KEKs), and re-encrypts it under the active
-     * KEK. Rows already encrypted under the active KEK are still re-wrapped (idempotent and cheap), so a
-     * single call leaves every row tagged with the active KEK id.
+     * Re-encrypts EVERY {@link KeyEncryptor}-protected secret under the currently-active KEK, across
+     * all four categories that share the one KEK: signing keys, TOTP secrets, webhook HMAC secrets,
+     * and OIDC client secrets (see {@link #ENCRYPTED_COLUMNS}). For each registered {@code (table,
+     * column)} it decrypts each blob (transparently handling legacy unversioned blobs and blobs under
+     * older KEKs) and re-encrypts it under the active KEK, so after a single call every blob is tagged
+     * with the active KEK id and the old KEK can be safely removed from configuration.
      *
-     * @return the number of signing-key rows re-encrypted.
+     * <p>The non-{@code keys} columns are re-wrapped GENERICALLY via native SQL (a per-row {@code
+     * UPDATE ... SET <col>=? WHERE <pk>=?}), so this method has no compile-time dependency on the
+     * mfa/webhooks/sso packages. Rows already encrypted under the active KEK are still re-wrapped
+     * (idempotent and cheap). The whole operation is one transaction: a failure rolls every column
+     * back, so we never leave a half-rotated state.
+     *
+     * @return the total number of blob rows re-encrypted across all categories.
      */
     @Transactional
     public int rotateKek() {
         String activeKekId = encryptor.activeKekId();
-        List<SigningKey> all = repo.findAll();
-        int count = 0;
-        for (SigningKey k : all) {
-            byte[] plaintext = encryptor.decrypt(k.getPrivateKeyEncrypted());
-            k.setPrivateKeyEncrypted(encryptor.encrypt(plaintext));
-            repo.save(k);
-            count++;
+        int total = 0;
+        Map<String, Integer> perColumn = new java.util.LinkedHashMap<>();
+        for (EncryptedColumn col : ENCRYPTED_COLUMNS) {
+            int n = reEncryptColumn(col);
+            perColumn.put(col.table() + "." + col.blobColumn(), n);
+            total += n;
         }
 
         AuditContext.set("key.kek.rotated");
@@ -192,12 +310,43 @@ public class KeyService {
 
         try {
             outbox.publish("kek", activeKekId, "KekRotated",
-                    Map.of("active_kek_id", activeKekId, "reencrypted_count", count));
+                    Map.of("active_kek_id", activeKekId, "reencrypted_count", total,
+                            "reencrypted_by_column", perColumn));
         } catch (Exception e) {
             log.warn("Failed to publish KekRotated outbox event: {}", e.getMessage());
         }
 
-        log.info("Rotated KEK: re-encrypted {} signing key(s) under active KEK id='{}'", count, activeKekId);
+        log.info("Rotated KEK: re-encrypted {} blob(s) under active KEK id='{}' ({})",
+                total, activeKekId, perColumn);
+        return total;
+    }
+
+    /**
+     * Re-encrypts every non-null blob in one registered column under the active KEK via native SQL.
+     * Reads {@code (pk, blob)} pairs, decrypts + re-encrypts each blob in application code, and writes
+     * it back with a targeted single-row UPDATE keyed on the primary key.
+     */
+    private int reEncryptColumn(EncryptedColumn col) {
+        String selectSql = "SELECT " + col.pkColumn() + ", " + col.blobColumn()
+                + " FROM " + col.table()
+                + " WHERE " + col.blobColumn() + " IS NOT NULL";
+        List<Object[]> rows = jdbc.query(selectSql,
+                (rs, rowNum) -> new Object[]{rs.getObject(1), rs.getBytes(2)});
+
+        String updateSql = "UPDATE " + col.table()
+                + " SET " + col.blobColumn() + " = ?"
+                + " WHERE " + col.pkColumn() + " = ?";
+        int count = 0;
+        for (Object[] row : rows) {
+            Object pk = row[0];
+            byte[] blob = (byte[]) row[1];
+            if (blob == null || blob.length == 0) {
+                continue;
+            }
+            byte[] reEncrypted = encryptor.encrypt(encryptor.decrypt(blob));
+            jdbc.update(updateSql, reEncrypted, pk);
+            count++;
+        }
         return count;
     }
 

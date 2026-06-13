@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -16,7 +17,13 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Multi-instance-safe transactional-outbox publisher.
+ * Multi-instance-safe transactional-outbox <em>delivery</em> scheduler.
+ *
+ * <p>Renamed from {@code OutboxPublisher} (it shared an unqualified class name with
+ * {@link com.example.cp.subscriptions.OutboxPublisher}, the <em>enqueue</em> side used by the domain
+ * services). To keep the two roles unambiguous there is now one enqueue API
+ * ({@code subscriptions.OutboxPublisher#publish}) and one delivery scheduler (this class). The dead,
+ * never-wired {@code OutboxRecorder} has been removed.</p>
  *
  * <p>On each scheduled tick it claims a bounded batch of due {@code PENDING} rows with
  * {@code SELECT ... FOR UPDATE SKIP LOCKED}, ordered by {@code occurred_at}. The row locks are held
@@ -37,11 +44,14 @@ import java.util.UUID;
  *   <li>after {@link #MAX_ATTEMPTS} attempts, mark the row {@code FAILED} (poison) and log loudly so
  *       it is quarantined rather than retried forever.</li>
  * </ul>
+ *
+ * <p>Retention: a separate scheduled sweep purges terminal ({@code PUBLISHED}/{@code FAILED}) rows
+ * older than {@code app.outbox.retention} so {@code outbox_events} does not grow unbounded.</p>
  */
-@Component("eventsOutboxPublisher")
-public class OutboxPublisher {
+@Component("eventsOutboxDeliveryScheduler")
+public class OutboxDeliveryScheduler {
 
-    private static final Logger log = LoggerFactory.getLogger(OutboxPublisher.class);
+    private static final Logger log = LoggerFactory.getLogger(OutboxDeliveryScheduler.class);
 
     private static final int BATCH_SIZE = 100;
     private static final String CHANNEL = "cp_events";
@@ -57,8 +67,13 @@ public class OutboxPublisher {
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    public OutboxPublisher(JdbcTemplate jdbc) {
+    /** How long a terminal (PUBLISHED/FAILED) outbox row is retained before the purge sweep removes it. */
+    private final Duration retention;
+
+    public OutboxDeliveryScheduler(JdbcTemplate jdbc,
+                                   @Value("${app.outbox.retention:P30D}") Duration retention) {
         this.jdbc = jdbc;
+        this.retention = retention;
     }
 
     @Scheduled(fixedDelay = 5000L)
@@ -96,6 +111,36 @@ public class OutboxPublisher {
         } catch (Exception e) {
             // Whole-batch failure (e.g. claim query / connection). Let the next tick retry.
             log.error("Outbox publisher batch failed: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Periodic retention sweep: deletes terminal ({@code PUBLISHED}/{@code FAILED}) rows whose
+     * {@code occurred_at} is older than the retention window, so {@code outbox_events} stays bounded.
+     *
+     * <p>Two guards keep the sweep safe against the other consumers of {@code outbox_events}:
+     * <ul>
+     *   <li>{@code PENDING} rows are never purged — they are still owed NOTIFY delivery;</li>
+     *   <li>only rows the webhook fan-out has already considered ({@code fanned_out_at IS NOT NULL})
+     *       are eligible, so the at-least-once webhook fan-out can never lose an event to retention.</li>
+     * </ul>
+     * Runs hourly.</p>
+     */
+    @Scheduled(fixedDelayString = "${app.outbox.purge.fixed-delay:PT1H}",
+            initialDelayString = "${app.outbox.purge.initial-delay:PT5M}")
+    @Transactional
+    public void purgeOldEvents() {
+        try {
+            OffsetDateTime cutoff = OffsetDateTime.now().minus(retention);
+            int deleted = jdbc.update(
+                    "DELETE FROM outbox_events WHERE status IN ('PUBLISHED', 'FAILED') " +
+                            "AND fanned_out_at IS NOT NULL AND occurred_at < ?",
+                    Timestamp.from(cutoff.toInstant()));
+            if (deleted > 0) {
+                log.info("Outbox retention sweep purged {} terminal events older than {}", deleted, cutoff);
+            }
+        } catch (Exception e) {
+            log.error("Outbox retention sweep failed: {}", e.getMessage());
         }
     }
 

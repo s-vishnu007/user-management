@@ -128,8 +128,9 @@ class KeyEncryptorTest {
 
     @Test
     void versionedBlobReferencingUnknownKek_isReported() {
-        // Blob written under v2, but the running encryptor only knows v1 -> must surface a clear error,
-        // NOT silently fall back to the legacy layout.
+        // Blob written under v2, but the running encryptor only knows v1 (and has NO default/legacy
+        // KEK to fall back to) -> must surface a clear error, NOT silently fall back to the legacy
+        // layout (the legacy fallback only applies when a default KEK is configured).
         KeyEncryptor writer = init("", "v2:" + KEK_B_B64, "v2");
         byte[] blob = writer.encrypt("x".getBytes(StandardCharsets.UTF_8));
 
@@ -139,12 +140,57 @@ class KeyEncryptorTest {
                 .hasMessageContaining("unknown KEK id");
     }
 
-    /** Replicates the exact legacy (pre-versioning) blob layout: [IV(12)][ciphertext||GCM tag]. */
-    private static byte[] legacyEncrypt(String masterKeyB64, byte[] plaintext) throws Exception {
-        byte[] aesKey = Base64.getDecoder().decode(masterKeyB64);
-        SecretKeySpec keySpec = new SecretKeySpec(aesKey, "AES");
+    @Test
+    void legacyBlobWhoseFirstByteIsMagic_fallsBackToLegacyInsteadOfThrowing() throws Exception {
+        // P3: a LEGACY (unversioned) blob whose first IV byte happens to equal the 0x01 magic AND whose
+        // following bytes parse as a self-consistent (but bogus) versioned envelope used to throw
+        // "unknown KEK id" instead of falling back to legacy decryption. Construct exactly such a blob
+        // by forcing the legacy IV's first byte to 0x01; with a default KEK present, decrypt must now
+        // recover it via the legacy layout.
+        KeyEncryptor e = init(LEGACY_B64, "", ""); // only the legacy/default KEK is configured
+        assertThat(e.activeKekId()).isEqualTo(KeyEncryptor.DEFAULT_KEK_ID);
+
+        byte[] plaintext = "legacy-with-magic-first-byte".getBytes(StandardCharsets.UTF_8);
         byte[] iv = new byte[12];
         new SecureRandom().nextBytes(iv);
+        iv[0] = (byte) 0x01;             // force the versioned-magic collision
+        iv[1] = (byte) 0x08;             // a plausible idLen so tryParseVersioned is self-consistent
+        byte[] legacyBlob = legacyEncryptWithIv(LEGACY_B64, plaintext, iv);
+        assertThat(legacyBlob[0]).isEqualTo((byte) 0x01);
+
+        // Must NOT throw; the legacy fallback recovers the original plaintext.
+        assertThat(e.decrypt(legacyBlob)).isEqualTo(plaintext);
+    }
+
+    @Test
+    void referencedKekId_reportsEmbeddedIdForVersioned_andDefaultForLegacy() throws Exception {
+        KeyEncryptor e = init(LEGACY_B64, "v1:" + KEK_A_B64 + ",v2:" + KEK_B_B64, "v2");
+
+        byte[] versioned = e.encrypt("x".getBytes(StandardCharsets.UTF_8));
+        assertThat(e.referencedKekId(versioned)).isEqualTo("v2");
+
+        byte[] legacy = legacyEncrypt(LEGACY_B64, "y".getBytes(StandardCharsets.UTF_8));
+        assertThat(e.referencedKekId(legacy)).isEqualTo(KeyEncryptor.DEFAULT_KEK_ID);
+    }
+
+    @Test
+    void configuredKekIds_listsEveryDecryptableKek() {
+        KeyEncryptor e = init(LEGACY_B64, "v1:" + KEK_A_B64 + ",v2:" + KEK_B_B64, "v2");
+        assertThat(e.configuredKekIds())
+                .contains("v1", "v2", KeyEncryptor.DEFAULT_KEK_ID);
+    }
+
+    /** Replicates the exact legacy (pre-versioning) blob layout: [IV(12)][ciphertext||GCM tag]. */
+    private static byte[] legacyEncrypt(String masterKeyB64, byte[] plaintext) throws Exception {
+        byte[] iv = new byte[12];
+        new SecureRandom().nextBytes(iv);
+        return legacyEncryptWithIv(masterKeyB64, plaintext, iv);
+    }
+
+    /** Legacy layout with a caller-chosen IV (used to force the 0x01-magic collision case). */
+    private static byte[] legacyEncryptWithIv(String masterKeyB64, byte[] plaintext, byte[] iv) throws Exception {
+        byte[] aesKey = Base64.getDecoder().decode(masterKeyB64);
+        SecretKeySpec keySpec = new SecretKeySpec(aesKey, "AES");
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.ENCRYPT_MODE, keySpec, new GCMParameterSpec(128, iv));
         byte[] ct = cipher.doFinal(plaintext);

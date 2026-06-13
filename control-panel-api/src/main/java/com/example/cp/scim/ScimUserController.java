@@ -158,8 +158,15 @@ public class ScimUserController {
         }
         String displayName = request.displayName() != null ? request.displayName()
                 : (request.name() != null ? request.name().formatted() : null);
-        Optional<ScimUser> updated = scimService.update(
-                orgId, actorUserId(), clientIp(), resourceId, request.active(), displayName, request.externalId());
+        // PUT is a FULL replace (RFC 7644 §3.5.1): attributes absent from the body are reset to their
+        // defaults (active -> true, displayName/externalId -> cleared), not silently preserved.
+        Optional<ScimUser> updated;
+        try {
+            updated = scimService.replace(
+                    orgId, actorUserId(), clientIp(), resourceId, request.active(), displayName, request.externalId());
+        } catch (ScimService.ScimConflictException e) {
+            return scimError(409, "uniqueness", e.getMessage());
+        }
         return updated.<ResponseEntity<?>>map(this::scimOk).orElseGet(() -> notFound(id));
     }
 
@@ -173,8 +180,13 @@ public class ScimUserController {
             return notFound(id);
         }
         PatchAttrs attrs = parsePatch(body);
-        Optional<ScimUser> updated = scimService.update(
-                orgId, actorUserId(), clientIp(), resourceId, attrs.active(), attrs.displayName(), attrs.externalId());
+        Optional<ScimUser> updated;
+        try {
+            updated = scimService.update(
+                    orgId, actorUserId(), clientIp(), resourceId, attrs.active(), attrs.displayName(), attrs.externalId());
+        } catch (ScimService.ScimConflictException e) {
+            return scimError(409, "uniqueness", e.getMessage());
+        }
         return updated.<ResponseEntity<?>>map(this::scimOk).orElseGet(() -> notFound(id));
     }
 

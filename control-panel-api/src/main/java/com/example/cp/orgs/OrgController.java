@@ -1,6 +1,7 @@
 package com.example.cp.orgs;
 
 import com.example.cp.common.AuthenticatedUser;
+import com.example.cp.common.PageRequestParams;
 import com.example.cp.common.PagedResponse;
 import com.example.cp.common.SecurityUtils;
 import jakarta.validation.Valid;
@@ -9,6 +10,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
+import org.springframework.data.domain.Pageable;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -17,6 +19,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.OffsetDateTime;
@@ -42,11 +45,12 @@ public class OrgController {
     }
 
     @GetMapping
-    public PagedResponse<OrgDto> listMine() {
+    public PagedResponse<OrgDto> listMine(@RequestParam(value = "page", required = false) Integer page,
+                                          @RequestParam(value = "size", required = false) Integer size) {
         UUID actorId = SecurityUtils.currentUserId();
-        List<OrgDto> items = orgService.listOrgsForUser(actorId).stream()
+        List<OrgDto> all = orgService.listOrgsForUser(actorId).stream()
                 .map(OrgDto::from).toList();
-        return PagedResponse.of(items, items.size(), 0, items.size());
+        return paginate(all, PageRequestParams.of(page, size, null));
     }
 
     @GetMapping("/{orgId}")
@@ -57,10 +61,26 @@ public class OrgController {
 
     @GetMapping("/{orgId}/members")
     @PreAuthorize("@orgAccess.isMember(#orgId)")
-    public PagedResponse<OrgMemberDto> listMembers(@PathVariable UUID orgId) {
-        List<OrgMemberDto> items = orgService.listMembers(orgId).stream()
+    public PagedResponse<OrgMemberDto> listMembers(@PathVariable UUID orgId,
+                                                   @RequestParam(value = "page", required = false) Integer page,
+                                                   @RequestParam(value = "size", required = false) Integer size) {
+        List<OrgMemberDto> all = orgService.listMembers(orgId).stream()
                 .map(OrgMemberDto::from).toList();
-        return PagedResponse.of(items, items.size(), 0, items.size());
+        return paginate(all, PageRequestParams.of(page, size, null));
+    }
+
+    /**
+     * Applies a server-side page/size window (already capped at {@link PageRequestParams#MAX_SIZE})
+     * to an in-memory, inherently-bounded collection and reports the TRUE total, so the
+     * {@link PagedResponse} envelope no longer lies about pagination (P3). Used for the membership-
+     * derived lists that cannot be served by a single Spring Data {@code Pageable} query.
+     */
+    private static <T> PagedResponse<T> paginate(List<T> all, Pageable pageable) {
+        int total = all.size();
+        int from = (int) Math.min((long) pageable.getPageNumber() * pageable.getPageSize(), total);
+        int to = (int) Math.min((long) from + pageable.getPageSize(), total);
+        List<T> window = all.subList(from, to);
+        return PagedResponse.of(window, total, pageable.getPageNumber(), pageable.getPageSize());
     }
 
     @PostMapping("/{orgId}/members")
@@ -85,7 +105,12 @@ public class OrgController {
     @DeleteMapping("/{orgId}/members/{userId}")
     @PreAuthorize("@orgAccess.hasRole(#orgId, 'ADMIN')")
     public ResponseEntity<Void> removeMember(@PathVariable UUID orgId, @PathVariable UUID userId) {
-        orgService.removeMember(orgId, userId);
+        AuthenticatedUser actor = SecurityUtils.requireUser();
+        OrgMember.Role actorRole = actor.superAdmin()
+                ? OrgMember.Role.OWNER
+                : orgService.roleOf(orgId, actor.userId())
+                        .orElseThrow(() -> com.example.cp.common.ApiException.forbidden("Not a member of this organization"));
+        orgService.removeMember(orgId, userId, actorRole, actor.superAdmin());
         return ResponseEntity.noContent().build();
     }
 

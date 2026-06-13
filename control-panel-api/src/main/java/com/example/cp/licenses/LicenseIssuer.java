@@ -26,6 +26,7 @@ public class LicenseIssuer {
     private final JwsSigner jwsSigner;
     private final LicenseClaimsBuilder claimsBuilder;
     private final LicenseTokenRepository tokenRepo;
+    private final LicenseArtifactRepository artifactRepo;
     private final SubscriptionService subService;
     private final OutboxPublisher outbox;
     private final int trialTtlDays;
@@ -34,6 +35,7 @@ public class LicenseIssuer {
                          JwsSigner jwsSigner,
                          LicenseClaimsBuilder claimsBuilder,
                          LicenseTokenRepository tokenRepo,
+                         LicenseArtifactRepository artifactRepo,
                          SubscriptionService subService,
                          OutboxPublisher outbox,
                          @Value("${app.licensing.trial-ttl-days:14}") int trialTtlDays) {
@@ -41,6 +43,7 @@ public class LicenseIssuer {
         this.jwsSigner = jwsSigner;
         this.claimsBuilder = claimsBuilder;
         this.tokenRepo = tokenRepo;
+        this.artifactRepo = artifactRepo;
         this.subService = subService;
         this.outbox = outbox;
         this.trialTtlDays = trialTtlDays;
@@ -90,6 +93,13 @@ public class LicenseIssuer {
                 .build();
         tokenRepo.save(row);
 
+        // Persist the exact signed artifact so GET /licenses/{jti}/download is a pure read and never
+        // re-mints a license on a cache/instance miss (audit P1-4). Written in the same transaction
+        // as the token row, so an issued jti always has a downloadable artifact.
+        IssuedLicense issued = new IssuedLicense(built.jti(), jwt, built.issuedAt(), built.expiresAt(),
+                built.planCode(), built.orgName(), built.orgSlug(), active.kid());
+        artifactRepo.save(LicenseArtifact.from(issued));
+
         AuditContext.set("license.issued");
         AuditContext.setTarget("license_token", built.jti());
         AuditContext.putPayload("subscription_id", sub.getId().toString());
@@ -110,8 +120,7 @@ public class LicenseIssuer {
                 )
         );
 
-        return new IssuedLicense(built.jti(), jwt, built.issuedAt(), built.expiresAt(),
-                built.planCode(), built.orgName(), built.orgSlug(), active.kid());
+        return issued;
     }
 
     private static String sha256TruncatedHex(String jwt, int hexChars) {

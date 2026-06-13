@@ -172,6 +172,57 @@ class MfaServiceTest {
         assertThat(service.isEnabled(null)).isFalse();
     }
 
+    // ---- replay protection ------------------------------------------------
+
+    @Test
+    void verifyLoginCode_recordsTheAcceptedStep_andRejectsTheSameCodeReplayedWithinTheWindow()
+            throws Exception {
+        when(repository.findByUserId(USER)).thenReturn(Optional.empty());
+        MfaService.EnrollmentResult enrollment = service.enroll(USER, "alice@example.com");
+        UserMfa stored = captureSaved();
+        stored.setEnabled(true);
+        when(repository.findByUserId(USER)).thenReturn(Optional.of(stored));
+
+        String code = currentCode(enrollment.secret());
+
+        // First use of the current code succeeds and advances last_accepted_step.
+        assertThat(service.verifyLoginCode(USER, code)).isTrue();
+        assertThat(stored.getLastAcceptedStep()).isNotNull();
+
+        // Replaying the SAME code (same time-step) inside its validity window is now rejected — the
+        // step is <= last_accepted_step. This is the core anti-replay guarantee.
+        assertThat(service.verifyLoginCode(USER, code)).isFalse();
+    }
+
+    @Test
+    void verifyLoginCode_rejectsACodeForAStepAtOrBeforeTheLastAccepted() throws Exception {
+        when(repository.findByUserId(USER)).thenReturn(Optional.empty());
+        MfaService.EnrollmentResult enrollment = service.enroll(USER, "alice@example.com");
+        UserMfa stored = captureSaved();
+        stored.setEnabled(true);
+
+        long currentStep = Math.floorDiv(timeProvider.getTime(), 30);
+        // Pretend a code at the current step has already been consumed.
+        stored.setLastAcceptedStep(currentStep);
+        when(repository.findByUserId(USER)).thenReturn(Optional.of(stored));
+
+        // The valid current-step code is refused because its step is not strictly greater.
+        assertThat(service.verifyLoginCode(USER, currentCode(enrollment.secret()))).isFalse();
+    }
+
+    @Test
+    void confirmEnrollment_recordsTheAcceptedStep() throws Exception {
+        when(repository.findByUserId(USER)).thenReturn(Optional.empty());
+        MfaService.EnrollmentResult enrollment = service.enroll(USER, "alice@example.com");
+        UserMfa stored = captureSaved();
+        stored.setEnabled(false);
+        when(repository.findByUserId(USER)).thenReturn(Optional.of(stored));
+
+        assertThat(service.confirmEnrollment(USER, currentCode(enrollment.secret()))).isTrue();
+        assertThat(stored.isEnabled()).isTrue();
+        assertThat(stored.getLastAcceptedStep()).isNotNull();
+    }
+
     // ---- challenge --------------------------------------------------------
 
     @Test

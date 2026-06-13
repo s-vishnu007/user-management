@@ -19,6 +19,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -215,6 +216,99 @@ class ScimUserProvisioningIT extends AbstractIntegrationTest {
         mockMvc.perform(get("/scim/v2/Users")
                         .with(asApiKey(org.getId(), "usage.read")))
                 .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void delete_thenGet_is404_andReProvisionSucceeds() throws Exception {
+        Organization org = seedOrg("SCIM Relifecycle Org");
+        String email = "scim-relink-" + rnd() + "@example.com";
+        String ext = "ext-relink-" + rnd();
+        String scimId = provision(org.getId(), email, ext);
+        User user = userRepository.findByEmail(email).orElseThrow();
+
+        // DELETE deprovisions and removes the SCIM mapping.
+        mockMvc.perform(delete("/scim/v2/Users/{id}", scimId)
+                        .with(asApiKey(org.getId(), "scim.manage")))
+                .andExpect(status().isNoContent());
+
+        // SCIM conformance: a GET on the deleted resource id is now a 404 (not a stale 200).
+        mockMvc.perform(get("/scim/v2/Users/{id}", scimId)
+                        .with(asApiKey(org.getId(), "scim.manage")))
+                .andExpect(status().isNotFound());
+
+        // The mapping row is gone; the user remains SUSPENDED.
+        assertThat(mappingRepository.findById(UUID.fromString(scimId))).isEmpty();
+        assertThat(userRepository.findById(user.getId()).orElseThrow().getStatus())
+                .isEqualTo(User.Status.SUSPENDED);
+
+        // Re-provisioning the same userName/externalId succeeds (no permanent 409) and reactivates the
+        // re-linked user with a brand-new SCIM resource id.
+        String newScimId = provision(org.getId(), email, ext);
+        assertThat(newScimId).isNotEqualTo(scimId);
+        assertThat(userRepository.findById(user.getId()).orElseThrow().getStatus())
+                .isEqualTo(User.Status.ACTIVE);
+    }
+
+    @Test
+    void put_isFullReplace_clearsAbsentExternalId() throws Exception {
+        Organization org = seedOrg("SCIM Put Org");
+        String email = "scim-put-" + rnd() + "@example.com";
+        String ext = "ext-put-" + rnd();
+        String scimId = provision(org.getId(), email, ext);
+        assertThat(mappingRepository.findById(UUID.fromString(scimId)).orElseThrow().getExternalId())
+                .isEqualTo(ext);
+
+        // PUT with no externalId/displayName is a FULL replace: absent attributes reset to defaults.
+        mockMvc.perform(put("/scim/v2/Users/{id}", scimId)
+                        .with(asApiKey(org.getId(), "scim.manage"))
+                        .contentType("application/scim+json")
+                        .content("""
+                                {"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],
+                                 "userName":"%s","active":true}
+                                """.formatted(email)))
+                .andExpect(status().isOk());
+
+        // externalId was cleared by the full replace (PATCH would have left it unchanged).
+        assertThat(mappingRepository.findById(UUID.fromString(scimId)).orElseThrow().getExternalId())
+                .isNull();
+    }
+
+    @Test
+    void patch_externalIdCollision_returns409NotServerError() throws Exception {
+        Organization org = seedOrg("SCIM Collide Org");
+        String extA = "ext-collide-a-" + rnd();
+        String extB = "ext-collide-b-" + rnd();
+        provision(org.getId(), "scim-c-a-" + rnd() + "@example.com", extA);
+        String scimIdB = provision(org.getId(), "scim-c-b-" + rnd() + "@example.com", extB);
+
+        // PATCH B's externalId to A's value collides on (org_id, external_id) -> SCIM 409, not 500.
+        mockMvc.perform(patch("/scim/v2/Users/{id}", scimIdB)
+                        .with(asApiKey(org.getId(), "scim.manage"))
+                        .contentType("application/scim+json")
+                        .content("""
+                                {"Operations":[{"op":"replace","path":"externalId","value":"%s"}]}
+                                """.formatted(extA)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.scimType", is("uniqueness")));
+    }
+
+    @Test
+    void list_startIndexIsAbsoluteOffset_notPageAligned() throws Exception {
+        Organization org = seedOrg("SCIM Offset Org");
+        // Seed 3 users so we can request an unaligned window (startIndex=2, count=2).
+        for (int i = 0; i < 3; i++) {
+            provision(org.getId(), "scim-off-" + i + "-" + rnd() + "@example.com", "ext-off-" + i + "-" + rnd());
+        }
+
+        // startIndex=2, count=2 must return the 2nd and 3rd resources (absolute 0-based offset 1),
+        // NOT page 0 (which page-aligned math (2-1)/2 = 0 would have returned).
+        mockMvc.perform(get("/scim/v2/Users")
+                        .param("startIndex", "2").param("count", "2")
+                        .with(asApiKey(org.getId(), "scim.manage")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.startIndex", is(2)))
+                .andExpect(jsonPath("$.totalResults", greaterThanOrEqualTo(3)))
+                .andExpect(jsonPath("$.Resources.length()", is(2)));
     }
 
     @Test

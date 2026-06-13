@@ -81,11 +81,11 @@ jobs:
         run: mvn -B versions:display-dependency-updates
 
   dependency-check:
-    name: Vulnerability scan (OWASP + npm audit, non-blocking)
+    name: Vulnerability scan (OWASP + npm audit)
     runs-on: ubuntu-latest
-    # Separate, non-blocking job: surfaces known-vulnerable dependencies without gating the build.
-    # The main "build" job stays the only required check; this never fails CI.
-    continue-on-error: true
+    # This job is now a real gate: the OWASP dependency-check step fails the build when a
+    # dependency carries a CVE at/above the configured CVSS threshold. (The npm audit step
+    # stays informational — see its own continue-on-error.)
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -105,20 +105,25 @@ jobs:
             ${{ runner.os }}-maven-
 
       # Cache the OWASP NVD data feed so scans don't re-download the full CVE database every run.
+      # An NVD API key (repo secret NVD_API_KEY) dramatically speeds up and de-flakes the feed
+      # update; the scan still runs without it, just slower.
       - name: Cache OWASP NVD data
         uses: actions/cache@v4
         with:
           path: ~/.m2/repository/org/owasp/dependency-check-data
           key: ${{ runner.os }}-owasp-nvd
 
-      # Run the OWASP dependency-check Maven goal across the reactor. continue-on-error on the job
-      # plus a non-failing CVSS threshold keeps this purely informational.
+      # Run the OWASP dependency-check Maven goal across the reactor and FAIL the build on any
+      # dependency with a CVSS score >= 7 (High/Critical). The previous value (11) is impossible
+      # — the CVSS scale maxes out at 10 — so the gate could never fire; 7 makes it real.
       - name: OWASP dependency-check
-        continue-on-error: true
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: >-
           mvn -B org.owasp:dependency-check-maven:check
           -Dformats=HTML,JSON
-          -DfailBuildOnCVSS=11
+          -DfailBuildOnCVSS=7
+          ${NVD_API_KEY:+-DnvdApiKey=$NVD_API_KEY}
 
       - name: Upload OWASP dependency-check report
         if: always()
@@ -133,8 +138,38 @@ jobs:
         with:
           node-version: '20'
 
-      # npm audit on the admin UI lockfile. Non-blocking: report vulnerabilities, never fail CI.
+      # npm audit on the admin UI lockfile. Non-blocking: report vulnerabilities, never fail CI
+      # (the prod bundle is clean; the known advisories are dev-only vite/esbuild issues).
       - name: npm audit (admin-ui)
         continue-on-error: true
         working-directory: admin-ui
         run: npm audit --audit-level=high
+
+  admin-ui:
+    name: Admin UI (install, typecheck, build)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: admin-ui/package-lock.json
+
+      # Reproducible install from the committed lockfile.
+      - name: Install dependencies
+        working-directory: admin-ui
+        run: npm ci
+
+      # Type-check the whole project (no emit) so contract/type drift fails CI.
+      - name: Type-check
+        working-directory: admin-ui
+        run: npm run lint
+
+      # Production build (tsc -b && vite build) — catches build-time regressions.
+      - name: Build
+        working-directory: admin-ui
+        run: npm run build

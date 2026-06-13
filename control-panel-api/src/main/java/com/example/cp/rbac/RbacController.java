@@ -3,10 +3,12 @@ package com.example.cp.rbac;
 import com.example.cp.common.ApiException;
 import com.example.cp.common.AuditContext;
 import com.example.cp.common.AuthenticatedUser;
+import com.example.cp.common.PageRequestParams;
 import com.example.cp.common.PagedResponse;
 import com.example.cp.common.SecurityUtils;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import org.springframework.data.domain.Pageable;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.transaction.annotation.Transactional;
@@ -16,9 +18,9 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -42,16 +44,18 @@ public class RbacController {
 
     @GetMapping("/roles")
     @PreAuthorize("hasAuthority('rbac.read')")
-    public PagedResponse<RoleDto> listRoles() {
-        List<RoleDto> items = roleRepository.findAll().stream().map(RoleDto::from).toList();
-        return PagedResponse.of(items, items.size(), 0, items.size());
+    public PagedResponse<RoleDto> listRoles(@RequestParam(value = "page", required = false) Integer page,
+                                            @RequestParam(value = "size", required = false) Integer size) {
+        Pageable pageable = PageRequestParams.of(page, size, null);
+        return PagedResponse.from(roleRepository.findAll(pageable).map(RoleDto::from));
     }
 
     @GetMapping("/permissions")
     @PreAuthorize("hasAuthority('rbac.read')")
-    public PagedResponse<PermissionDto> listPermissions() {
-        List<PermissionDto> items = permissionRepository.findAll().stream().map(PermissionDto::from).toList();
-        return PagedResponse.of(items, items.size(), 0, items.size());
+    public PagedResponse<PermissionDto> listPermissions(@RequestParam(value = "page", required = false) Integer page,
+                                                        @RequestParam(value = "size", required = false) Integer size) {
+        Pageable pageable = PageRequestParams.of(page, size, null);
+        return PagedResponse.from(permissionRepository.findAll(pageable).map(PermissionDto::from));
     }
 
     @PostMapping("/users/{userId}/roles")
@@ -86,12 +90,20 @@ public class RbacController {
     public ResponseEntity<Void> removeRole(@PathVariable UUID userId,
                                            @PathVariable UUID roleId,
                                            @org.springframework.web.bind.annotation.RequestParam(value = "orgId", required = false) UUID orgId) {
+        Role role = roleRepository.findById(roleId)
+                .orElseThrow(() -> ApiException.notFound("Role not found"));
+        AuthenticatedUser actor = SecurityUtils.requireUser();
+        // Set the audit action BEFORE the authorization check so a denied removal is also recorded
+        // (the @AfterThrowing audit advice needs an action present in AuditContext) — mirrors assignRole.
+        AuditContext.set("rbac.role.removed");
+        AuditContext.setTarget("user_role", userId + ":" + roleId + (orgId == null ? "" : ":" + orgId));
+        // Mirror the system-role / global-scope / amplification guard applied to assignment so removal
+        // cannot be used to side-step it (P3).
+        rbacAuthz.assertCanRemove(actor, role, orgId);
         int removed = userRoleRepository.deleteAssignment(userId, roleId, orgId);
         if (removed == 0) {
             throw ApiException.notFound("Role assignment not found");
         }
-        AuditContext.set("rbac.role.removed");
-        AuditContext.setTarget("user_role", userId + ":" + roleId + (orgId == null ? "" : ":" + orgId));
         return ResponseEntity.noContent().build();
     }
 

@@ -1,8 +1,11 @@
 package com.example.cp.apikeys;
 
 import com.example.cp.common.AuditContext;
+import com.example.cp.common.PageRequestParams;
+import com.example.cp.common.PagedResponse;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Size;
+import org.springframework.data.domain.Pageable;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -11,10 +14,10 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.OffsetDateTime;
-import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -37,10 +40,16 @@ public class ApiKeyController {
         return CreateResponse.from(result);
     }
 
+    // Server-side page/size enforcement: PageRequestParams caps size at MAX_SIZE (200) and defaults
+    // to DEFAULT_SIZE (20), so a client cannot pull an unbounded key list. Returns a paged envelope
+    // (matching the audit/org/rbac list idiom) rather than a bare array.
     @GetMapping
     @PreAuthorize("@tenantAccess.canAccessOrg(#orgId)")
-    public List<ApiKeyDto> list(@PathVariable UUID orgId) {
-        return service.listForOrg(orgId).stream().map(ApiKeyDto::from).toList();
+    public PagedResponse<ApiKeyDto> list(@PathVariable UUID orgId,
+                                         @RequestParam(required = false) Integer page,
+                                         @RequestParam(required = false) Integer size) {
+        Pageable p = PageRequestParams.of(page, size, "createdAt,desc");
+        return PagedResponse.from(service.listForOrg(orgId, p).map(ApiKeyDto::from));
     }
 
     @DeleteMapping("/{id}")

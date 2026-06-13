@@ -3,9 +3,11 @@ package com.example.cp.usage;
 import com.example.cp.common.AuditContext;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -47,7 +49,15 @@ public class UsageIngestController {
                         e.occurredAt(),
                         e.metadata()))
                 .toList();
-        UsageIngestService.IngestResult result = service.ingest(body.jti(), events);
+        UsageIngestService.IngestResult result;
+        try {
+            result = service.ingest(body.jti(), events);
+        } catch (UsageIngestService.DedupCollisionException collision) {
+            // A concurrent request won the dedup race and already persisted these events (the @Transactional
+            // ingest rolled back on this exception). Return idempotently with zero newly-accepted rather
+            // than a raw 500 — no work is lost. (The events' eventIds are the idempotency keys.)
+            result = new UsageIngestService.IngestResult(0, collision.subscriptionId);
+        }
         AuditContext.set("usage.ingested");
         AuditContext.setTarget("subscription", result.subscriptionId().toString());
         AuditContext.putPayload("events_count", result.eventsAccepted());
@@ -55,8 +65,12 @@ public class UsageIngestController {
                 .body(new IngestResponse(result.eventsAccepted(), result.subscriptionId()));
     }
 
+    // Tenant-scoped: the global subscription.read/usage.read authority is no longer a cross-org bypass.
+    // @tenantAccess.canReadSubscription resolves the TARGET subscription's owning org and authorizes
+    // against it (super-admin; api-key bound to that org; or an org member), mirroring LicenseController.list.
     @GetMapping("/subscriptions/{subId}/usage")
-    @PreAuthorize("hasAuthority('subscription.read') or hasAuthority('usage.read')")
+    @PreAuthorize("(hasAuthority('subscription.read') or hasAuthority('usage.read')) "
+            + "and @tenantAccess.canReadSubscription(#subId)")
     public UsageReport listUsage(@PathVariable UUID subId,
                                  @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime from,
                                  @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime to,
@@ -69,15 +83,21 @@ public class UsageIngestController {
     }
 
     public record IngestRequest(
-            @NotBlank String jti,
-            @NotEmpty List<EventDto> events
+            // jti is the license id (license_tokens.jti VARCHAR(64)); cap to the column width so an
+            // oversized value is a 400 here rather than a downstream DataIntegrityViolation -> 500.
+            @NotBlank @Size(max = 64, message = "jti must be at most 64 characters") String jti,
+            @NotEmpty List<@Valid EventDto> events
     ) {}
 
     public record EventDto(
-            String eventId,
-            @NotBlank String featureKey,
+            // event_id VARCHAR(120): bound the optional idempotency key to the column width (400, not 500).
+            @Size(max = 120, message = "eventId must be at most 120 characters") String eventId,
+            // feature_key VARCHAR(64): bound to the column width.
+            @NotBlank @Size(max = 64, message = "featureKey must be at most 64 characters") String featureKey,
+            // quantity NUMERIC: cap precision/scale so an absurd value is a 400, not a DB-cast 500.
             @NotNull(message = "quantity is required")
             @DecimalMin(value = "0", inclusive = false, message = "quantity must be greater than 0")
+            @Digits(integer = 19, fraction = 6, message = "quantity has too many digits")
             BigDecimal quantity,
             OffsetDateTime occurredAt,
             Map<String, Object> metadata

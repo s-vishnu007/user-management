@@ -245,6 +245,98 @@ class LicenseVerifierTest {
     }
 
     @Test
+    void missing_typ_header_throws_malformed() throws Exception {
+        Instant now = Instant.parse("2026-06-01T10:00:00Z");
+        Clock clock = Clock.fixed(now, ZoneOffset.UTC);
+
+        // A token signed by the legitimate key but with NO typ header must be rejected: an
+        // attacker who can produce a same-key token of another type (CRL, session) could otherwise
+        // strip the typ and have it accepted as a license.
+        String jwt = signLicenseWithTyp(now, now.plus(Duration.ofDays(365)), signingKey, null);
+
+        LicenseVerifier verifier = buildVerifier(clock);
+        assertThatThrownBy(() -> verifier.verify(jwt))
+                .isInstanceOf(LicenseFileMalformedException.class)
+                .hasMessageContaining("typ");
+    }
+
+    @Test
+    void wrong_typ_header_throws_malformed() throws Exception {
+        Instant now = Instant.parse("2026-06-01T10:00:00Z");
+        Clock clock = Clock.fixed(now, ZoneOffset.UTC);
+
+        String jwt = signLicenseWithTyp(now, now.plus(Duration.ofDays(365)), signingKey, "crl+jwt");
+
+        LicenseVerifier verifier = buildVerifier(clock);
+        assertThatThrownBy(() -> verifier.verify(jwt))
+                .isInstanceOf(LicenseFileMalformedException.class)
+                .hasMessageContaining("typ");
+    }
+
+    @Test
+    void verify_allowing_expired_returns_expired_but_valid_license() throws Exception {
+        Instant signingTime = Instant.parse("2025-01-01T10:00:00Z");
+        Instant exp = signingTime.plus(Duration.ofDays(1)); // long expired
+        Instant verifyTime = Instant.parse("2026-06-01T10:00:00Z");
+        Clock clock = Clock.fixed(verifyTime, ZoneOffset.UTC);
+
+        String jwt = signLicense(signingTime, exp);
+        LicenseVerifier verifier = buildVerifier(clock);
+
+        // Plain verify() still hard-rejects expiry.
+        assertThatThrownBy(() -> verifier.verify(jwt))
+                .isInstanceOf(LicenseExpiredException.class);
+
+        // verifyAllowingExpired() returns the parsed license carrying the real (past) expiry so a
+        // consumer can enter a READ_ONLY grace at startup.
+        License license = verifier.verifyAllowingExpired(jwt);
+        assertThat(license.getJti()).isEqualTo("lic_test_001");
+        assertThat(license.getExpiresAt()).isEqualTo(exp);
+        assertThat(license.isExpired(clock)).isTrue();
+    }
+
+    @Test
+    void verify_allowing_expired_still_enforces_signature_and_audience() throws Exception {
+        Instant signingTime = Instant.parse("2025-01-01T10:00:00Z");
+        Instant exp = signingTime.plus(Duration.ofDays(1));
+        Instant verifyTime = Instant.parse("2026-06-01T10:00:00Z");
+        Clock clock = Clock.fixed(verifyTime, ZoneOffset.UTC);
+
+        // Tampered signature must still be rejected even when expiry is tolerated.
+        String jwt = signLicense(signingTime, exp);
+        String[] parts = jwt.split("\\.");
+        char[] sig = parts[2].toCharArray();
+        sig[0] = sig[0] == 'A' ? 'B' : 'A';
+        String tampered = parts[0] + "." + parts[1] + "." + new String(sig);
+
+        LicenseVerifier verifier = buildVerifier(clock);
+        assertThatThrownBy(() -> verifier.verifyAllowingExpired(tampered))
+                .isInstanceOf(LicenseSignatureInvalidException.class);
+
+        // Wrong audience must still be rejected.
+        LicenseVerifier wrongAud = LicenseVerifier.builder()
+                .publicKeys(PublicKeyProvider.fromJwks(jwksStream()))
+                .audience("some-other-app")
+                .clock(clock)
+                .build();
+        assertThatThrownBy(() -> wrongAud.verifyAllowingExpired(jwt))
+                .isInstanceOf(LicenseAudienceMismatchException.class);
+    }
+
+    @Test
+    void verify_allowing_expired_still_rejects_missing_exp() throws Exception {
+        Instant now = Instant.parse("2026-06-01T10:00:00Z");
+        Clock clock = Clock.fixed(now, ZoneOffset.UTC);
+
+        String jwt = signLicenseWithoutExp(now);
+        LicenseVerifier verifier = buildVerifier(clock);
+
+        assertThatThrownBy(() -> verifier.verifyAllowingExpired(jwt))
+                .isInstanceOf(LicenseExpiredException.class)
+                .hasMessageContaining("mandatory exp");
+    }
+
+    @Test
     void clock_skew_tolerates_slight_expiration() throws Exception {
         Instant signingTime = Instant.parse("2026-06-01T10:00:00Z");
         Instant exp = signingTime.plus(Duration.ofMinutes(10));
@@ -283,14 +375,24 @@ class LicenseVerifierTest {
     }
 
     private String signLicenseWithNbf(Instant iat, Instant exp, Instant nbf) throws JOSEException {
-        return signLicenseInternal(iat, exp, nbf, signingKey);
+        return signLicenseInternal(iat, exp, nbf, signingKey, "license+jwt", true);
     }
 
     private String signLicenseWithKey(Instant iat, Instant exp, OctetKeyPair key) throws JOSEException {
-        return signLicenseInternal(iat, exp, iat, key);
+        return signLicenseInternal(iat, exp, iat, key, "license+jwt", true);
     }
 
-    private String signLicenseInternal(Instant iat, Instant exp, Instant nbf, OctetKeyPair key) throws JOSEException {
+    private String signLicenseWithTyp(Instant iat, Instant exp, OctetKeyPair key, String typ)
+            throws JOSEException {
+        return signLicenseInternal(iat, exp, iat, key, typ, true);
+    }
+
+    private String signLicenseWithoutExp(Instant iat) throws JOSEException {
+        return signLicenseInternal(iat, null, iat, signingKey, "license+jwt", false);
+    }
+
+    private String signLicenseInternal(Instant iat, Instant exp, Instant nbf, OctetKeyPair key,
+                                       String typ, boolean includeExp) throws JOSEException {
         Map<String, Object> features = new LinkedHashMap<>();
         features.put("max_users", 50);
         features.put("max_storage_gb", 100);
@@ -300,29 +402,31 @@ class LicenseVerifierTest {
         customer.put("org_name", "Acme Corp");
         customer.put("contact_email", "billing@acme.com");
 
-        JWTClaimsSet claims = new JWTClaimsSet.Builder()
+        JWTClaimsSet.Builder claimsBuilder = new JWTClaimsSet.Builder()
                 .issuer(ISSUER)
                 .audience(AUDIENCE)
                 .subject("org_acme")
                 .jwtID("lic_test_001")
                 .issueTime(Date.from(iat))
                 .notBeforeTime(Date.from(nbf))
-                .expirationTime(Date.from(exp))
                 .claim("subscription_id", "sub_acme_pro")
                 .claim("plan", "pro")
                 .claim("permissions", List.of("export.pdf", "api.v2", "admin.users.invite"))
                 .claim("features", features)
                 .claim("seats", 25)
                 .claim("customer", customer)
-                .claim("version", 1)
-                .build();
+                .claim("version", 1);
+        if (includeExp && exp != null) {
+            claimsBuilder.expirationTime(Date.from(exp));
+        }
 
-        JWSHeader header = new JWSHeader.Builder(JWSAlgorithm.EdDSA)
-                .keyID(key.getKeyID())
-                .type(new JOSEObjectType("license+jwt"))
-                .build();
+        JWSHeader.Builder headerBuilder = new JWSHeader.Builder(JWSAlgorithm.EdDSA)
+                .keyID(key.getKeyID());
+        if (typ != null) {
+            headerBuilder.type(new JOSEObjectType(typ));
+        }
 
-        SignedJWT jwt = new SignedJWT(header, claims);
+        SignedJWT jwt = new SignedJWT(headerBuilder.build(), claimsBuilder.build());
         JWSSigner signer = new Ed25519Signer(key);
         jwt.sign(signer);
         return jwt.serialize();

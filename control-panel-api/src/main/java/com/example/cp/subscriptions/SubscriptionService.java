@@ -4,6 +4,7 @@ import com.example.cp.common.ApiException;
 import com.example.cp.common.AuditContext;
 import com.example.cp.common.Ids;
 import com.example.cp.common.SecurityUtils;
+import com.example.cp.licenses.LicenseRevocationService;
 import com.example.cp.orgs.Organization;
 import com.example.cp.orgs.OrganizationRepository;
 import com.example.cp.plans.Plan;
@@ -15,19 +16,41 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 @Service
 public class SubscriptionService {
+
+    /**
+     * Allowed subscription status transitions (P2 state machine). CANCELLED is terminal: it has no
+     * outgoing transitions, so {@code cancel -> suspend -> reactivate} can no longer resurrect a
+     * cancelled subscription. EXPIRED (set by the lifecycle sweeper) is also terminal. Any transition
+     * not listed here is rejected with 409.
+     */
+    private static final Map<Subscription.Status, Set<Subscription.Status>> ALLOWED_TRANSITIONS;
+    static {
+        EnumMap<Subscription.Status, Set<Subscription.Status>> m = new EnumMap<>(Subscription.Status.class);
+        m.put(Subscription.Status.ACTIVE,
+                EnumSet.of(Subscription.Status.SUSPENDED, Subscription.Status.CANCELLED));
+        m.put(Subscription.Status.SUSPENDED,
+                EnumSet.of(Subscription.Status.ACTIVE, Subscription.Status.CANCELLED));
+        m.put(Subscription.Status.CANCELLED, EnumSet.noneOf(Subscription.Status.class));
+        m.put(Subscription.Status.EXPIRED, EnumSet.noneOf(Subscription.Status.class));
+        ALLOWED_TRANSITIONS = m;
+    }
 
     private final SubscriptionRepository subRepo;
     private final SubscriptionOverrideRepository overrideRepo;
     private final OrganizationRepository orgRepo;
     private final PlanRepository planRepo;
     private final OutboxPublisher outbox;
+    private final LicenseRevocationService revocationService;
     private final ObjectMapper objectMapper;
 
     public SubscriptionService(SubscriptionRepository subRepo,
@@ -35,13 +58,30 @@ public class SubscriptionService {
                                OrganizationRepository orgRepo,
                                PlanRepository planRepo,
                                OutboxPublisher outbox,
+                               LicenseRevocationService revocationService,
                                ObjectMapper objectMapper) {
         this.subRepo = subRepo;
         this.overrideRepo = overrideRepo;
         this.orgRepo = orgRepo;
         this.planRepo = planRepo;
         this.outbox = outbox;
+        this.revocationService = revocationService;
         this.objectMapper = objectMapper;
+    }
+
+    /**
+     * Validates a status transition against {@link #ALLOWED_TRANSITIONS}, throwing 409 on an illegal
+     * move. A no-op transition (same status) is allowed and treated idempotently by callers.
+     */
+    private void assertTransitionAllowed(Subscription.Status from, Subscription.Status to) {
+        if (from == to) {
+            return;
+        }
+        Set<Subscription.Status> allowed = ALLOWED_TRANSITIONS.getOrDefault(from, Set.of());
+        if (!allowed.contains(to)) {
+            throw ApiException.conflict(
+                    "Illegal subscription transition: " + from + " -> " + to);
+        }
     }
 
     @Transactional
@@ -106,11 +146,21 @@ public class SubscriptionService {
     @Transactional
     public Subscription suspend(UUID id, String reason) {
         Subscription s = get(id);
+        assertTransitionAllowed(s.getStatus(), Subscription.Status.SUSPENDED);
         s.setStatus(Subscription.Status.SUSPENDED);
         Subscription saved = subRepo.save(s);
+
+        // P1-5: cascade revocation to all ACTIVE licenses of this subscription so suspending a
+        // customer actually invalidates their offline licenses (they land on the CRL) instead of
+        // leaving them valid + seat-holding until natural expiry.
+        UUID actorId = SecurityUtils.currentUser().map(u -> u.userId()).orElse(null);
+        int revoked = revocationService.revokeAllActiveForSubscription(
+                id, "subscription suspended" + (reason == null ? "" : ": " + reason), actorId);
+
         AuditContext.set("subscription.suspended");
         AuditContext.setTarget("subscription", id.toString());
         if (reason != null) AuditContext.putPayload("reason", reason);
+        AuditContext.putPayload("licenses_revoked", revoked);
         outbox.publish("subscription", id.toString(), "SubscriptionSuspended",
                 Map.of("subscription_id", id.toString(), "reason", reason == null ? "" : reason));
         return saved;
@@ -119,9 +169,8 @@ public class SubscriptionService {
     @Transactional
     public Subscription reactivate(UUID id) {
         Subscription s = get(id);
-        if (s.getStatus() == Subscription.Status.CANCELLED) {
-            throw ApiException.badRequest("Cannot reactivate a cancelled subscription; create a new one");
-        }
+        // CANCELLED/EXPIRED are terminal: assertTransitionAllowed rejects reactivation (409).
+        assertTransitionAllowed(s.getStatus(), Subscription.Status.ACTIVE);
         s.setStatus(Subscription.Status.ACTIVE);
         Subscription saved = subRepo.save(s);
         AuditContext.set("subscription.reactivated");
@@ -134,11 +183,19 @@ public class SubscriptionService {
     @Transactional
     public Subscription cancel(UUID id, String reason) {
         Subscription s = get(id);
+        assertTransitionAllowed(s.getStatus(), Subscription.Status.CANCELLED);
         s.setStatus(Subscription.Status.CANCELLED);
         Subscription saved = subRepo.save(s);
+
+        // P1-5: cancelling likewise cascades revocation to the subscription's ACTIVE licenses.
+        UUID actorId = SecurityUtils.currentUser().map(u -> u.userId()).orElse(null);
+        int revoked = revocationService.revokeAllActiveForSubscription(
+                id, "subscription cancelled" + (reason == null ? "" : ": " + reason), actorId);
+
         AuditContext.set("subscription.cancelled");
         AuditContext.setTarget("subscription", id.toString());
         if (reason != null) AuditContext.putPayload("reason", reason);
+        AuditContext.putPayload("licenses_revoked", revoked);
         outbox.publish("subscription", id.toString(), "SubscriptionCancelled",
                 Map.of("subscription_id", id.toString(), "reason", reason == null ? "" : reason));
         return saved;
@@ -218,13 +275,18 @@ public class SubscriptionService {
         } catch (JsonProcessingException e) {
             throw ApiException.badRequest("Invalid override value");
         }
-        SubscriptionOverride ov = SubscriptionOverride.builder()
-                .id(Ids.newId())
-                .subscriptionId(subscriptionId)
-                .type(t)
-                .key(req.key())
-                .valueJson(json)
-                .build();
+        // Upsert on the (subscription, type, key) unique key (P3): a repeated override for the same
+        // key updates the existing row's value rather than inserting a duplicate (which the new
+        // UNIQUE constraint would reject) — keeping entitlement resolution deterministic.
+        SubscriptionOverride ov = overrideRepo
+                .findBySubscriptionIdAndTypeAndKey(subscriptionId, t, req.key())
+                .orElseGet(() -> SubscriptionOverride.builder()
+                        .id(Ids.newId())
+                        .subscriptionId(subscriptionId)
+                        .type(t)
+                        .key(req.key())
+                        .build());
+        ov.setValueJson(json);
         return overrideRepo.save(ov);
     }
 
@@ -246,7 +308,8 @@ public class SubscriptionService {
         java.util.LinkedHashSet<String> perms = new java.util.LinkedHashSet<>(planPermissions);
         Map<String, Object> features = new LinkedHashMap<>(planFeatures);
 
-        for (SubscriptionOverride ov : overrideRepo.findBySubscriptionId(subscriptionId)) {
+        // Deterministic order (type, key) so resolution is independent of row insertion order (P3).
+        for (SubscriptionOverride ov : overrideRepo.findBySubscriptionIdOrderByTypeAscKeyAsc(subscriptionId)) {
             Object val = parseValue(ov.getValueJson());
             switch (ov.getType()) {
                 case PERMISSION -> {

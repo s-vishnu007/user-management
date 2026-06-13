@@ -313,4 +313,97 @@ class RbacAuthorizationServiceTest {
         verify(permissionService).permissionsFor(ACTOR, ORG);
         verify(rolePermissionRepository).findByRoleId(ROLE_ID);
     }
+
+    // ======================================================================
+    //  assertCanRemove — mirrors the assignment guards (P3), minus self-elevation.
+    // ======================================================================
+
+    @Nested
+    class RemovalGuard {
+
+        @Test
+        void nullActor_throwsUnauthorized_andTouchesNoCollaborators() {
+            assertThatThrownBy(() -> service.assertCanRemove(null, assignableRole(), ORG))
+                    .isInstanceOfSatisfying(ApiException.class,
+                            ex -> assertThat(ex.getStatus()).isEqualTo(HttpStatus.UNAUTHORIZED));
+            verifyNoInteractions(permissionService, rolePermissionRepository, permissionRepository);
+        }
+
+        @Test
+        void nullRole_throwsBadRequest() {
+            assertThatThrownBy(() -> service.assertCanRemove(superAdmin(), null, ORG))
+                    .satisfies(apiException(HttpStatus.BAD_REQUEST, "Role is required"));
+        }
+
+        @Test
+        void superAdminCode_isForbiddenEvenForSuperAdminActor() {
+            Role superRole = role("SUPER_ADMIN", true);
+            assertThatThrownBy(() -> service.assertCanRemove(superAdmin(), superRole, ORG))
+                    .satisfies(apiException(HttpStatus.FORBIDDEN, "SUPER_ADMIN cannot be removed"));
+            verifyNoInteractions(permissionService, rolePermissionRepository, permissionRepository);
+        }
+
+        @Test
+        void systemRole_isForbiddenEvenForSuperAdminActor() {
+            Role systemRole = role("ORG_OWNER", true);
+            assertThatThrownBy(() -> service.assertCanRemove(superAdmin(), systemRole, ORG))
+                    .satisfies(apiException(HttpStatus.FORBIDDEN, "System roles cannot be removed"));
+            verifyNoInteractions(permissionService, rolePermissionRepository, permissionRepository);
+        }
+
+        @Test
+        void globalRemoval_byActorWithoutRoleAssign_isForbidden() {
+            AuthenticatedUser actor = human("user.read");
+            assertThatThrownBy(() -> service.assertCanRemove(actor, assignableRole(), null))
+                    .satisfies(apiException(HttpStatus.FORBIDDEN, "Global role removal requires platform authority"));
+            verifyNoInteractions(permissionService, rolePermissionRepository, permissionRepository);
+        }
+
+        @Test
+        void actorLackingAGrantedCode_isForbidden_withThatCodeInMessage() {
+            AuthenticatedUser actor = human();
+            stubRoleGrants("user.write");
+            stubActorPerms(ORG, "org.read", "user.read");
+
+            assertThatThrownBy(() -> service.assertCanRemove(actor, assignableRole(), ORG))
+                    .isInstanceOfSatisfying(ApiException.class, ex -> {
+                        assertThat(ex.getStatus()).isEqualTo(HttpStatus.FORBIDDEN);
+                        assertThat(ex.getDetail())
+                                .contains("Cannot remove a role granting authority you do not hold")
+                                .contains("user.write");
+                    });
+        }
+
+        @Test
+        void actorHoldingAllGrantedCodes_passes() {
+            AuthenticatedUser actor = human();
+            stubRoleGrants("user.read", "user.write");
+            stubActorPerms(ORG, "user.read", "user.write", "org.read");
+
+            assertThatCode(() -> service.assertCanRemove(actor, assignableRole(), ORG))
+                    .doesNotThrowAnyException();
+        }
+
+        @Test
+        void superAdminActor_skipsAmplificationLookups() {
+            assertThatCode(() -> service.assertCanRemove(superAdmin(), assignableRole(), ORG))
+                    .doesNotThrowAnyException();
+            verify(permissionService, never()).permissionsFor(any(), any());
+            verifyNoInteractions(rolePermissionRepository, permissionRepository);
+        }
+
+        @Test
+        void removalHasNoSelfElevationGuard_actorMayRemoveOwnNonSystemRole() {
+            // Unlike assignment, removal does NOT block a (de-escalating) self-removal: an actor that
+            // holds every code the role grants may remove that role from its own user id.
+            AuthenticatedUser actor = human();
+            stubRoleGrants("user.read");
+            stubActorPerms(ORG, "user.read");
+
+            // No targetUserId parameter exists on assertCanRemove (self vs other is irrelevant); the
+            // call simply must not throw when amplification passes.
+            assertThatCode(() -> service.assertCanRemove(actor, assignableRole(), ORG))
+                    .doesNotThrowAnyException();
+        }
+    }
 }

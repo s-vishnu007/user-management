@@ -43,6 +43,15 @@ public class UserMfa {
     @Builder.Default
     private boolean enabled = false;
 
+    /**
+     * The 30-second TOTP time-step ({@code epochSeconds / 30}) of the most-recently-accepted code.
+     * {@code null} until the first code is accepted. A login/confirm code is rejected when its step
+     * is {@code <= lastAcceptedStep}, so a code observed (e.g. shoulder-surfed or intercepted) cannot
+     * be replayed within the ~90s window otherwise allowed by the verifier's skew tolerance.
+     */
+    @Column(name = "last_accepted_step")
+    private Long lastAcceptedStep;
+
     @Column(name = "created_at", nullable = false)
     private OffsetDateTime createdAt;
 }

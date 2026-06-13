@@ -78,6 +78,51 @@ public class RbacAuthorizationService {
         }
     }
 
+    /**
+     * Validates that {@code actor} may REMOVE {@code targetRole} (scoped to {@code orgId}; null =
+     * global) from a user. Mirrors the system-role / global-scope / privilege-amplification guards of
+     * {@link #assertCanAssign} so removal cannot be used to side-step them, but omits the
+     * self-elevation guard (removing a role is a de-escalation, never an escalation, and a user
+     * removing their own non-system role is legitimate). Throws {@link ApiException} on violation.
+     */
+    public void assertCanRemove(AuthenticatedUser actor, Role targetRole, UUID orgId) {
+        // (1) Authentication.
+        if (actor == null) {
+            throw ApiException.unauthorized("Not authenticated");
+        }
+
+        // (2) Block system / super roles via the API, exactly as assignment does. The seeded
+        // SUPER_ADMIN and ORG_* roles are is_system=TRUE and are managed out-of-band, not through this
+        // endpoint. This runs BEFORE the superAdmin bypass so even super admins cannot strip
+        // SUPER_ADMIN via the API.
+        if (targetRole == null) {
+            throw ApiException.badRequest("Role is required");
+        }
+        if ("SUPER_ADMIN".equals(targetRole.getCode())) {
+            throw ApiException.forbidden("SUPER_ADMIN cannot be removed via the API");
+        }
+        if (targetRole.isSystem()) {
+            throw ApiException.forbidden("System roles cannot be removed via the API");
+        }
+
+        // (3) Scope authorization: global removal requires platform authority (matches assignment).
+        if (orgId == null && !actor.superAdmin() && !actor.hasAuthority("role.assign")) {
+            throw ApiException.forbidden("Global role removal requires platform authority");
+        }
+
+        // (4) Privilege amplification: an actor cannot remove a role granting a permission code it
+        // does not itself hold (prevents using removal as an indirect way to manipulate grants the
+        // actor has no authority over).
+        if (!actor.superAdmin()) {
+            Set<String> actorPerms = permissionService.permissionsFor(actor.userId(), orgId);
+            for (String code : permissionCodesForRole(targetRole.getId())) {
+                if (!actorPerms.contains(code)) {
+                    throw ApiException.forbidden("Cannot remove a role granting authority you do not hold: " + code);
+                }
+            }
+        }
+    }
+
     /** Resolves the set of permission codes granted by the role. Exposed for unit testing. */
     public Set<String> permissionCodesForRole(UUID roleId) {
         Set<String> codes = new LinkedHashSet<>();

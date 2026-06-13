@@ -7,6 +7,22 @@
 # values at its safe (prod) default, so accidental packaging of this file is
 # harmless unless the dev profile is explicitly activated.
 
+spring:
+  # Local-dev datasource defaults. The base application.yml now REQUIRES DB_URL/DB_USER/DB_PASS (no
+  # baked-in cp/cp fallback for prod safety), so the dev profile restores convenient localhost
+  # defaults here. Still overridable by env for devs pointing at a non-default local Postgres.
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/cp}
+    username: ${DB_USER:cp}
+    password: ${DB_PASS:cp}
+
+# Re-enable the OpenAPI spec + Swagger UI for local development (disabled in the base/prod profile).
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+
 app:
   auth:
     # Return the raw password-reset token in the API response so local devs can

@@ -10,7 +10,6 @@ import com.example.cp.users.User;
 import com.example.cp.users.UserRepository;
 import com.example.cp.users.UserService;
 import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
@@ -88,12 +87,16 @@ public class ScimService {
         if (safeCount == 0) {
             return ScimListResponse.of(List.of(), (int) total, safeStart, 0);
         }
-        // SCIM startIndex is 1-based; Spring Data pages are 0-based offsets.
-        Pageable pageable = PageRequest.of((safeStart - 1) / Math.max(safeCount, 1), Math.max(safeCount, 1),
+        // P3: SCIM startIndex is a 1-based ABSOLUTE offset (RFC 7644 §3.4.2.4), not a page number. The
+        // previous code treated it as page-aligned ((start-1)/count), so an unaligned startIndex returned
+        // a shifted/overlapping window. Use OffsetPageRequest to honor the absolute offset exactly.
+        int offset = safeStart - 1;
+        Pageable pageable = new OffsetPageRequest(offset, Math.max(safeCount, 1),
                 Sort.by(Sort.Direction.ASC, "createdAt"));
         Page<ScimUserMapping> mappings = mappingRepository.findByOrgId(orgId, pageable);
         List<ScimUser> resources = new ArrayList<>();
         for (ScimUserMapping m : mappings.getContent()) {
+            // Skip mappings whose linked user has been GDPR-erased (DELETED): the resource is gone.
             toScimUser(orgId, m).ifPresent(resources::add);
         }
         return ScimListResponse.of(resources, (int) total, safeStart, resources.size());
@@ -147,6 +150,13 @@ public class ScimService {
             if (mappingRepository.existsByOrgIdAndUserId(orgId, user.getId())) {
                 throw new ScimConflictException("A user with that userName already exists");
             }
+            // Re-provisioning a previously deprovisioned (DELETE'd mapping → SUSPENDED) user: bring the
+            // account back to ACTIVE so the re-linked SCIM resource reflects a usable user, unless the
+            // request explicitly creates it inactive (handled below).
+            if (user.getStatus() == User.Status.SUSPENDED) {
+                user.setStatus(User.Status.ACTIVE);
+                userRepository.save(user);
+            }
         }
 
         // Ensure org membership (idempotent: an already-present membership is left as-is).
@@ -172,7 +182,7 @@ public class ScimService {
                 .userId(user.getId())
                 .createdAt(OffsetDateTime.now())
                 .build();
-        ScimUserMapping saved = mappingRepository.save(mapping);
+        ScimUserMapping saved = saveMappingHandlingUniqueness(mapping);
 
         final User provisioned = user; // capture for the lambda (user is reassigned above)
         audit(actorUserId, orgId, "scim.user.provisioned", saved, ip, payload -> {
@@ -194,26 +204,58 @@ public class ScimService {
     // ------------------------------------------------------------------
 
     /**
-     * Applies a full ({@code PUT}) or partial ({@code PATCH}) update to a SCIM user: the supported
-     * mutable attributes are {@code active} (provision/deprovision) and the display name. Email
-     * ({@code userName}) is treated as immutable here — the control panel keys identity by email, so
-     * changing it would be a re-provision, not an update.
+     * Partial ({@code PATCH}) update of a SCIM user: only the explicitly-supplied mutable attributes
+     * ({@code active}, display name, {@code externalId}) are changed; a {@code null} argument means
+     * "leave unchanged". Email ({@code userName}) is immutable here (changing it would be a
+     * re-provision, not an update).
      */
     @Transactional
     public Optional<ScimUser> update(UUID orgId, UUID actorUserId, String ip, UUID resourceId,
                                      Boolean active, String displayName, String externalId) {
+        return apply(orgId, actorUserId, ip, resourceId, active, displayName, externalId, false);
+    }
+
+    /**
+     * Full-resource ({@code PUT}) replace of a SCIM user (RFC 7644 §3.5.1): attributes ABSENT from the
+     * representation are reset to their defaults, not left as-is. {@code active} defaults to true,
+     * {@code displayName} clears to null, and {@code externalId} clears to null when omitted.
+     */
+    @Transactional
+    public Optional<ScimUser> replace(UUID orgId, UUID actorUserId, String ip, UUID resourceId,
+                                      Boolean active, String displayName, String externalId) {
+        // Full replace: an absent active means "true" (the SCIM default for a present resource).
+        Boolean effectiveActive = active != null ? active : Boolean.TRUE;
+        return apply(orgId, actorUserId, ip, resourceId, effectiveActive, displayName, externalId, true);
+    }
+
+    /**
+     * Shared update engine. When {@code fullReplace} is true, a {@code null} {@code displayName} /
+     * {@code externalId} clears the stored value (PUT semantics); otherwise {@code null} leaves it
+     * unchanged (PATCH semantics).
+     */
+    private Optional<ScimUser> apply(UUID orgId, UUID actorUserId, String ip, UUID resourceId,
+                                     Boolean active, String displayName, String externalId,
+                                     boolean fullReplace) {
         ScimUserMapping mapping = mappingRepository.findByIdAndOrgId(resourceId, orgId).orElse(null);
         if (mapping == null) {
             return Optional.empty();
         }
         User user = userRepository.findById(mapping.getUserId()).orElse(null);
-        if (user == null) {
+        if (user == null || user.getStatus() == User.Status.DELETED) {
+            // A GDPR-erased user has no addressable SCIM resource.
             return Optional.empty();
         }
 
         boolean changed = false;
 
-        if (displayName != null && !displayName.equals(user.getFullName())) {
+        // Display name: on full replace an absent (null) display name clears it; on PATCH null = no-op.
+        if (fullReplace) {
+            if (!java.util.Objects.equals(displayName, user.getFullName())) {
+                user.setFullName(displayName);
+                userRepository.save(user);
+                changed = true;
+            }
+        } else if (displayName != null && !displayName.equals(user.getFullName())) {
             // updateProfile lives in UserService (bucket A); name-only updates are a simple setter here
             // on the user we own a reference to, persisted via the repository (no password/policy touch).
             user.setFullName(displayName);
@@ -221,11 +263,29 @@ public class ScimService {
             changed = true;
         }
 
-        if (externalId != null) {
+        // externalId: on full replace an absent (null) externalId clears it; on PATCH null = no-op.
+        if (fullReplace && externalId == null) {
+            if (mapping.getExternalId() != null) {
+                mapping.setExternalId(null);
+                mappingRepository.save(mapping);
+                changed = true;
+            }
+        } else if (externalId != null) {
             String normalized = trimToNull(externalId);
             if (normalized != null && !normalized.equals(mapping.getExternalId())) {
+                // A collision with another mapping's externalId in this org violates the
+                // (org_id, external_id) unique constraint — surface it as a SCIM 409 uniqueness conflict
+                // rather than a raw 500 (P3). Pre-check for a friendly message, then let the DB enforce.
+                if (mappingRepository.findByOrgIdAndExternalId(orgId, normalized)
+                        .filter(m -> !m.getId().equals(mapping.getId())).isPresent()) {
+                    throw new ScimConflictException("A user with that externalId already exists");
+                }
                 mapping.setExternalId(normalized);
-                mappingRepository.save(mapping);
+                try {
+                    mappingRepository.saveAndFlush(mapping);
+                } catch (org.springframework.dao.DataIntegrityViolationException e) {
+                    throw new ScimConflictException("A user with that externalId already exists");
+                }
                 changed = true;
             }
         }
@@ -260,11 +320,15 @@ public class ScimService {
 
     /**
      * Deprovisions the SCIM user: the linked control-panel user is deactivated (status SUSPENDED +
-     * token_version bump for session revocation) via {@link UserService#deactivate}. Returns false if
-     * the resource is not in the caller's org (the controller maps that to a 404).
+     * token_version bump for session revocation) via {@link UserService#deactivate}, and the SCIM
+     * mapping row is DELETED. Returns false if the resource is not in the caller's org (the controller
+     * maps that to a 404).
      *
-     * <p>The mapping row is retained (not deleted) so a later re-provision/audit can still correlate
-     * the IdP externalId; the user's SUSPENDED status is the authoritative deprovisioned state.
+     * <p>The mapping is removed (not soft-retained) so SCIM DELETE is conformant: a subsequent GET on
+     * the resource id returns 404, and re-provisioning the same {@code userName}/{@code externalId}
+     * succeeds (re-linking the same — now reactivated — user) instead of hitting a permanent 409. The
+     * user's SUSPENDED status remains the durable deprovisioned state and the {@code scim.user.*} audit
+     * rows preserve the externalId correlation in their payloads.
      */
     @Transactional
     public boolean deprovision(UUID orgId, UUID actorUserId, String ip, UUID resourceId) {
@@ -273,8 +337,16 @@ public class ScimService {
             return false;
         }
         userService.deactivate(mapping.getUserId());
-        audit(actorUserId, orgId, "scim.user.deprovisioned", mapping, ip, p ->
-                p.put("user_id", mapping.getUserId().toString()));
+        // Capture identifiers for the audit payload BEFORE deleting the mapping row.
+        UUID mappedUserId = mapping.getUserId();
+        String externalId = mapping.getExternalId();
+        audit(actorUserId, orgId, "scim.user.deprovisioned", mapping, ip, p -> {
+            p.put("user_id", mappedUserId.toString());
+            if (externalId != null) {
+                p.put("external_id", externalId);
+            }
+        });
+        mappingRepository.delete(mapping);
         AuditContext.markRecorded();
         return true;
     }
@@ -282,6 +354,20 @@ public class ScimService {
     // ------------------------------------------------------------------
     // Internal helpers
     // ------------------------------------------------------------------
+
+    /**
+     * Persist a new mapping, translating a DB unique-constraint violation (either
+     * {@code (org_id, external_id)} or {@code (org_id, user_id)}) into a SCIM 409 uniqueness conflict
+     * instead of letting it surface as a raw 500. Guards the check-then-insert race the in-memory
+     * {@code existsBy*}/{@code findBy*} guards above cannot fully close under concurrency.
+     */
+    private ScimUserMapping saveMappingHandlingUniqueness(ScimUserMapping mapping) {
+        try {
+            return mappingRepository.saveAndFlush(mapping);
+        } catch (org.springframework.dao.DataIntegrityViolationException e) {
+            throw new ScimConflictException("A user with that userName or externalId already exists");
+        }
+    }
 
     private Optional<ScimUserMapping> resolveFilter(UUID orgId, ScimFilter filter) {
         String attr = filter.attribute();
@@ -301,6 +387,10 @@ public class ScimService {
 
     private Optional<ScimUser> toScimUser(UUID orgId, ScimUserMapping mapping) {
         return userRepository.findById(mapping.getUserId())
+                // A GDPR-erased (DELETED) user has no SCIM resource: treat the mapping as absent so GET
+                // returns 404 and list omits it. SUSPENDED (deprovisioned) users still render with
+                // active=false until truly deleted.
+                .filter(u -> u.getStatus() != User.Status.DELETED)
                 .map(u -> buildScimUser(mapping, u));
     }
 

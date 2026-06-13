@@ -133,11 +133,13 @@ public class IdempotencyInterceptor implements HandlerInterceptor {
         }
         try {
             int status = response.getStatus();
-            // A server-side failure (unhandled exception, or any 5xx the advice rendered) is treated as
-            // transient: release the claim so a retry can genuinely re-execute the mutation rather than
-            // being pinned forever to a one-off error. 2xx/3xx and deterministic 4xx client errors are
-            // cached so a retry replays the identical, reproducible outcome.
-            if (ex != null || status >= 500) {
+            // Only a SUCCESSFUL outcome is durable. A 4xx client error (400/404/409/422/...) is NOT
+            // cached: caching it would pin a transient/correctable failure for the whole TTL so a
+            // corrected retry under the same key could never re-execute (it would just replay the old
+            // error). A server-side failure (unhandled exception, or any 5xx) is likewise transient.
+            // In both cases we RELEASE the claim (delete the in-flight row) so a later retry genuinely
+            // re-executes. Only 2xx (and 3xx) responses are completed and become replayable.
+            if (ex != null || status < 200 || status >= 400) {
                 store.delete(rowId);
                 return;
             }
@@ -145,7 +147,11 @@ public class IdempotencyInterceptor implements HandlerInterceptor {
                     ContentCachingResponseWrapper.class);
             String body = cached == null ? null
                     : new String(cached.getContentAsByteArray(), StandardCharsets.UTF_8);
-            store.complete(rowId, status, body);
+            // Capture the response Content-Type and Location so a replay reproduces them faithfully
+            // (a 201 Created's Location, a non-JSON Content-Type, etc.) rather than guessing.
+            String contentType = response.getContentType();
+            String location = response.getHeader("Location");
+            store.complete(rowId, status, body, contentType, location);
         } catch (Exception persistFailure) {
             // Never let an idempotency bookkeeping failure mask the real response; just release the
             // claim so the in-flight row cannot wedge future retries.
@@ -183,10 +189,18 @@ public class IdempotencyInterceptor implements HandlerInterceptor {
     private void replay(IdempotencyKey record, HttpServletResponse response) throws Exception {
         response.setStatus(record.getResponseStatus());
         response.setHeader(REPLAYED_HEADER, "true");
+        // Restore the original Location (e.g. a 201 Created's resource URI) so a replayed response is
+        // indistinguishable from the first.
+        if (record.getResponseLocation() != null && !record.getResponseLocation().isEmpty()) {
+            response.setHeader("Location", record.getResponseLocation());
+        }
         String body = record.getResponseBody();
         if (body != null && !body.isEmpty()) {
-            // Replays of our JSON APIs are JSON; default to JSON when we cannot know the original type.
-            if (response.getContentType() == null) {
+            // Prefer the originally-captured Content-Type; fall back to JSON only when it is unknown
+            // (older rows persisted before the type was captured).
+            if (record.getResponseContentType() != null && !record.getResponseContentType().isEmpty()) {
+                response.setContentType(record.getResponseContentType());
+            } else if (response.getContentType() == null) {
                 response.setContentType(MediaType.APPLICATION_JSON_VALUE);
             }
             // Write through the (caching) response; the body-caching filter copies it to the real
@@ -350,10 +364,12 @@ public class IdempotencyInterceptor implements HandlerInterceptor {
         }
 
         @Transactional(propagation = Propagation.REQUIRES_NEW)
-        public void complete(UUID rowId, int status, String body) {
+        public void complete(UUID rowId, int status, String body, String contentType, String location) {
             repository.findById(rowId).ifPresent(row -> {
                 row.setResponseStatus(status);
                 row.setResponseBody(body);
+                row.setResponseContentType(contentType);
+                row.setResponseLocation(location);
                 repository.save(row);
             });
         }

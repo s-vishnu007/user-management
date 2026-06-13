@@ -12,10 +12,9 @@ import com.nimbusds.jose.crypto.MACVerifier;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import dev.samstevens.totp.code.CodeGenerator;
-import dev.samstevens.totp.code.CodeVerifier;
 import dev.samstevens.totp.code.DefaultCodeGenerator;
-import dev.samstevens.totp.code.DefaultCodeVerifier;
 import dev.samstevens.totp.code.HashingAlgorithm;
+import dev.samstevens.totp.exceptions.CodeGenerationException;
 import dev.samstevens.totp.secret.DefaultSecretGenerator;
 import dev.samstevens.totp.secret.SecretGenerator;
 import dev.samstevens.totp.time.SystemTimeProvider;
@@ -26,6 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.text.ParseException;
 import java.time.Duration;
 import java.time.Instant;
@@ -54,13 +54,16 @@ public class MfaService {
 
     /** Marks the short-lived JWT issued after step-1 of login as an MFA challenge, not a session. */
     private static final String CHALLENGE_PURPOSE = "mfa_challenge";
+    /** Issuer stamped on (and required of) the challenge — same value the session token uses. */
+    private static final String CHALLENGE_ISSUER = "control-panel";
     /** Short challenge lifetime: enough to type a code, short enough to limit replay. */
     private static final Duration CHALLENGE_TTL = Duration.ofMinutes(5);
 
     private final UserMfaRepository repository;
     private final KeyEncryptor keyEncryptor;
     private final SecretGenerator secretGenerator;
-    private final CodeVerifier codeVerifier;
+    private final CodeGenerator codeGenerator;
+    private final TimeProvider timeProvider;
     private final String issuerLabel;
     private final String sessionSecret;
 
@@ -71,12 +74,8 @@ public class MfaService {
         this.repository = repository;
         this.keyEncryptor = keyEncryptor;
         this.secretGenerator = new DefaultSecretGenerator();
-        TimeProvider timeProvider = new SystemTimeProvider();
-        CodeGenerator codeGenerator = new DefaultCodeGenerator(ALGORITHM, DIGITS);
-        DefaultCodeVerifier verifier = new DefaultCodeVerifier(codeGenerator, timeProvider);
-        verifier.setTimePeriod(TIME_PERIOD_SECONDS);
-        verifier.setAllowedTimePeriodDiscrepancy(ALLOWED_TIME_PERIOD_DISCREPANCY);
-        this.codeVerifier = verifier;
+        this.timeProvider = new SystemTimeProvider();
+        this.codeGenerator = new DefaultCodeGenerator(ALGORITHM, DIGITS);
         this.issuerLabel = (issuerLabel == null || issuerLabel.isBlank()) ? "control-panel" : issuerLabel;
         this.sessionSecret = sessionSecret == null ? "" : sessionSecret;
     }
@@ -124,24 +123,31 @@ public class MfaService {
     public boolean confirmEnrollment(UUID userId, String code) {
         UserMfa row = repository.findByUserId(userId)
                 .orElseThrow(() -> ApiException.badRequest("No MFA enrollment in progress"));
-        if (!verifyCode(row, code)) {
+        if (!verifyAndAdvanceStep(row, code)) {
             return false;
         }
         if (!row.isEnabled()) {
             row.setEnabled(true);
-            repository.save(row);
         }
+        repository.save(row);
         return true;
     }
 
-    /** Verifies a TOTP code for an enabled user (used during the two-step login). */
-    @Transactional(readOnly = true)
+    /**
+     * Verifies a TOTP code for an enabled user (used during the two-step login). Writable because a
+     * successful verification advances the stored {@code last_accepted_step} to prevent replay.
+     */
+    @Transactional
     public boolean verifyLoginCode(UUID userId, String code) {
         UserMfa row = repository.findByUserId(userId).orElse(null);
         if (row == null || !row.isEnabled()) {
             return false;
         }
-        return verifyCode(row, code);
+        if (!verifyAndAdvanceStep(row, code)) {
+            return false;
+        }
+        repository.save(row);
+        return true;
     }
 
     /** Disables MFA for a user by deleting the enrollment row. No-op if not enrolled. */
@@ -162,6 +168,7 @@ public class MfaService {
         Instant exp = now.plus(CHALLENGE_TTL);
         try {
             JWTClaimsSet claims = new JWTClaimsSet.Builder()
+                    .issuer(CHALLENGE_ISSUER)
                     .subject(userId.toString())
                     .claim("email", email)
                     .claim("purpose", CHALLENGE_PURPOSE)
@@ -194,7 +201,8 @@ public class MfaService {
                 throw ApiException.unauthorized("Invalid MFA challenge");
             }
             JWTClaimsSet claims = jwt.getJWTClaimsSet();
-            if (!CHALLENGE_PURPOSE.equals(claims.getStringClaim("purpose"))) {
+            if (!CHALLENGE_PURPOSE.equals(claims.getStringClaim("purpose"))
+                    || !CHALLENGE_ISSUER.equals(claims.getIssuer())) {
                 throw ApiException.unauthorized("Invalid MFA challenge");
             }
             Date exp = claims.getExpirationTime();
@@ -207,12 +215,54 @@ public class MfaService {
         }
     }
 
-    private boolean verifyCode(UserMfa row, String code) {
+    /**
+     * Verifies {@code code} against {@code row}'s secret over the allowed skew window and, on a match,
+     * advances {@link UserMfa#getLastAcceptedStep()} to the matched time-step so the same (or any
+     * earlier) step cannot be reused. Returns {@code false} (no state change) when the code does not
+     * match or matches only a step that has already been consumed (replay).
+     *
+     * <p>The {@code dev.samstevens.totp} verifier only answers "valid somewhere in the window"; to
+     * enforce monotonicity we reproduce its check by generating the expected code for each candidate
+     * step ourselves (same SHA1/6-digit primitives) and constant-time-comparing — taking the newest
+     * matching step. The caller is responsible for persisting the mutated row.</p>
+     */
+    private boolean verifyAndAdvanceStep(UserMfa row, String code) {
         if (code == null || code.isBlank()) {
             return false;
         }
+        String candidate = code.trim();
+        if (candidate.length() != DIGITS) {
+            return false;
+        }
         String secret = new String(keyEncryptor.decrypt(row.getSecretEnc()), StandardCharsets.UTF_8);
-        return codeVerifier.isValidCode(secret, code.trim());
+        long currentStep = Math.floorDiv(timeProvider.getTime(), TIME_PERIOD_SECONDS);
+        Long last = row.getLastAcceptedStep();
+
+        // Scan the newest step first so a code valid at multiple steps consumes the latest one.
+        for (long step = currentStep + ALLOWED_TIME_PERIOD_DISCREPANCY;
+             step >= currentStep - ALLOWED_TIME_PERIOD_DISCREPANCY; step--) {
+            // Replay guard: never accept a code at a step at or before the last consumed one.
+            if (last != null && step <= last) {
+                continue;
+            }
+            String expected;
+            try {
+                expected = codeGenerator.generate(secret, step);
+            } catch (CodeGenerationException e) {
+                return false;
+            }
+            if (constantTimeEquals(expected, candidate)) {
+                row.setLastAcceptedStep(step);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Length-independent constant-time string comparison for TOTP code matching. */
+    private static boolean constantTimeEquals(String a, String b) {
+        return MessageDigest.isEqual(
+                a.getBytes(StandardCharsets.UTF_8), b.getBytes(StandardCharsets.UTF_8));
     }
 
     /**

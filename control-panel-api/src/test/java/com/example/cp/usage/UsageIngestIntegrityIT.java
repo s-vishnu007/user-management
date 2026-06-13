@@ -300,6 +300,52 @@ class UsageIngestIntegrityIT extends AbstractIntegrationTest {
         assertThat(consumed(sub.getId(), "seats", occurred)).isEqualByComparingTo(new BigDecimal("10"));
     }
 
+    @Test
+    void multipleEventsInSameBucket_summingOverLimit_isRejected_409_andConsumedUnchanged() throws Exception {
+        // Two events for the SAME (feature, period) in ONE batch whose quantities sum past the limit
+        // must be rejected as a unit: the atomic per-bucket guarded upsert sees the aggregated add, so
+        // a batch can't sneak past by splitting the overage across events.
+        Plan plan = seedPlan("pro");
+        Organization org = seedOrg("Org Bucket Sum");
+        Subscription sub = seedSubscription(org.getId(), plan.getId());
+        String jti = seedActiveLicense(sub.getId());
+
+        OffsetDateTime occurred = OffsetDateTime.now();
+        seedQuota(sub.getId(), "seats", occurred, new BigDecimal("10"), new BigDecimal("8"));
+
+        // 1 + 2 = 3 added to consumed 8 -> 11 > 10 -> rejected, whole tx rolled back.
+        mockMvc.perform(post(INGEST)
+                        .with(asApiKey(org.getId(), "usage.ingest"))
+                        .contentType("application/json")
+                        .content(ingestJson(jti,
+                                event("seats", new BigDecimal("1"), occurred, "evt-" + rnd()),
+                                event("seats", new BigDecimal("2"), occurred, "evt-" + rnd()))))
+                .andExpect(status().isConflict());
+
+        assertThat(usageEventRepository.findInRange(sub.getId(), null, null)).isEmpty();
+        assertThat(consumed(sub.getId(), "seats", occurred)).isEqualByComparingTo(new BigDecimal("8"));
+    }
+
+    @Test
+    void overLimitOnFreshPeriod_withNoSeededRow_acceptsBecauseInsertHasNoLimit() throws Exception {
+        // A period with no pre-seeded quota row inserts limit_value = NULL (no cap configured), so the
+        // guarded upsert always applies on first insert: this proves affected==0 is reserved strictly
+        // for the existing-row-over-limit case, not a fresh insert.
+        Plan plan = seedPlan("pro");
+        Organization org = seedOrg("Org Fresh Period");
+        Subscription sub = seedSubscription(org.getId(), plan.getId());
+        String jti = seedActiveLicense(sub.getId());
+
+        OffsetDateTime occurred = OffsetDateTime.now();
+        mockMvc.perform(post(INGEST)
+                        .with(asApiKey(org.getId(), "usage.ingest"))
+                        .contentType("application/json")
+                        .content(ingestJson(jti, event("seats", new BigDecimal("9999"), occurred, "evt-" + rnd()))))
+                .andExpect(status().isAccepted());
+
+        assertThat(consumed(sub.getId(), "seats", occurred)).isEqualByComparingTo(new BigDecimal("9999"));
+    }
+
     // ------------------------------------------------------------------
     // helpers
     // ------------------------------------------------------------------

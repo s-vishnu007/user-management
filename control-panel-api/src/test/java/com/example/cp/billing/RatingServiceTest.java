@@ -145,6 +145,64 @@ class RatingServiceTest {
         assertThat(rated.total()).isEqualByComparingTo("0.00");
     }
 
+    // ------------------------------------------------------------------
+    // Currency-aware minor-unit rounding (P3): round to the currency's fraction digits.
+    // ------------------------------------------------------------------
+
+    @Test
+    void scaleFor_resolvesCurrencyMinorUnitExponent() {
+        assertThat(RatingService.scaleFor("USD")).isEqualTo(2);
+        assertThat(RatingService.scaleFor("eur")).isEqualTo(2); // case-insensitive
+        assertThat(RatingService.scaleFor("JPY")).isEqualTo(0); // zero-decimal currency
+        assertThat(RatingService.scaleFor("KWD")).isEqualTo(3); // three-decimal currency
+        assertThat(RatingService.scaleFor("ZZZ")).isEqualTo(RatingService.SCALE); // unknown -> default
+        assertThat(RatingService.scaleFor(null)).isEqualTo(RatingService.SCALE);
+        assertThat(RatingService.scaleFor("  ")).isEqualTo(RatingService.SCALE);
+    }
+
+    @Test
+    void zeroDecimalCurrency_roundsAmountsToWholeUnits() {
+        UUID planId = UUID.randomUUID();
+        when(planService.getFeatures(planId)).thenReturn(Map.of("price.api_calls", "0.5"));
+
+        // 999 * 0.5 = 499.5 -> JPY has 0 minor digits -> rounds HALF_UP to 500.
+        RatingService.RatedInvoice rated =
+                ratingService.rate(planId, Map.of("api_calls", bd("999")), "JPY");
+
+        RatingService.RatedLine line = rated.lines().get(0);
+        assertThat(line.amount()).isEqualByComparingTo("500");
+        assertThat(line.amount().scale()).isEqualTo(0);
+        assertThat(rated.total()).isEqualByComparingTo("500");
+        assertThat(rated.total().scale()).isEqualTo(0);
+    }
+
+    @Test
+    void threeDecimalCurrency_keepsThreeMinorDigits() {
+        UUID planId = UUID.randomUUID();
+        when(planService.getFeatures(planId)).thenReturn(Map.of("price.units", "0.0005"));
+
+        // 3 * 0.0005 = 0.0015 -> KWD has 3 minor digits -> rounds HALF_UP to 0.002.
+        RatingService.RatedInvoice rated =
+                ratingService.rate(planId, Map.of("units", bd("3")), "KWD");
+
+        assertThat(rated.lines().get(0).amount()).isEqualByComparingTo("0.002");
+        assertThat(rated.lines().get(0).amount().scale()).isEqualTo(3);
+        assertThat(rated.total()).isEqualByComparingTo("0.002");
+        assertThat(rated.total().scale()).isEqualTo(3);
+    }
+
+    @Test
+    void unknownCurrency_fallsBackToDefaultScale() {
+        UUID planId = UUID.randomUUID();
+        when(planService.getFeatures(planId)).thenReturn(Map.of("price.seats", "5"));
+
+        RatingService.RatedInvoice rated =
+                ratingService.rate(planId, Map.of("seats", bd("3")), "ZZZ");
+
+        assertThat(rated.total()).isEqualByComparingTo("15.00");
+        assertThat(rated.total().scale()).isEqualTo(RatingService.SCALE);
+    }
+
     private static RatingService.RatedLine lineFor(RatingService.RatedInvoice rated, String featureKey) {
         return rated.lines().stream()
                 .filter(l -> l.featureKey().equals(featureKey))

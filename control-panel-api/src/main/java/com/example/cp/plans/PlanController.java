@@ -1,8 +1,12 @@
 package com.example.cp.plans;
 
+import com.example.cp.common.PageRequestParams;
+import com.fasterxml.jackson.annotation.JsonAlias;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
+import org.springframework.data.domain.Pageable;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -30,8 +34,14 @@ public class PlanController {
 
     @GetMapping
     @PreAuthorize("isAuthenticated()")
-    public List<PlanDto> list(@RequestParam(value = "activeOnly", defaultValue = "false") boolean activeOnly) {
-        return planService.listWithDetails(activeOnly);
+    public List<PlanDto> list(@RequestParam(value = "activeOnly", defaultValue = "false") boolean activeOnly,
+                              @RequestParam(value = "page", required = false) Integer page,
+                              @RequestParam(value = "size", required = false) Integer size) {
+        // Server-side page/size window (capped at PageRequestParams.MAX_SIZE) so the catalog endpoint
+        // can never return an unbounded result set (P3). Default window covers the small seeded
+        // catalog; callers may page explicitly.
+        Pageable pageable = PageRequestParams.of(page, size, null);
+        return planService.listWithDetails(activeOnly, pageable);
     }
 
     @GetMapping("/{id}")
@@ -92,7 +102,17 @@ public class PlanController {
             Boolean active
     ) {}
 
-    public record ReplacePermissionsRequest(@Valid List<String> permissionCodes) {}
+    /**
+     * Body for {@code POST /plans/{id}/permissions}. {@code permissionCodes} is the canonical field
+     * name; {@code @JsonAlias("permissions")} accepts the admin-UI client's historical field name so a
+     * field-name mismatch can never silently bind {@code null}. {@code @NotNull} REJECTS an
+     * absent/null list with 400 rather than treating it as "delete everything" (the P0-2 data-loss
+     * bug). An explicit empty list is still permitted: that is a deliberate "clear all permissions".
+     */
+    public record ReplacePermissionsRequest(
+            @NotNull(message = "permissionCodes is required (send an empty array to clear all permissions)")
+            @JsonAlias("permissions")
+            List<@NotBlank @Size(max = 64) String> permissionCodes) {}
 
     public record ReplaceFeaturesRequest(Map<String, Object> features) {}
 }

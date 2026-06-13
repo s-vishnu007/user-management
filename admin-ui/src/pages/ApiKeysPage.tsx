@@ -15,7 +15,6 @@ import type { ApiKey } from '@/lib/types';
 const schema = z.object({
   name: z.string().min(2),
   scopes: z.string().min(1, 'At least one scope is required'),
-  expiresAt: z.string().optional(),
 });
 type Values = z.infer<typeof schema>;
 
@@ -45,7 +44,6 @@ export function ApiKeysPage() {
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean),
-        expiresAt: v.expiresAt || undefined,
       }),
     onSuccess: (k) => {
       qc.invalidateQueries({ queryKey: ['org', orgId, 'api-keys'] });
@@ -100,9 +98,10 @@ export function ApiKeysPage() {
       render: (k) => (k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : '—'),
     },
     {
-      key: 'expires',
-      header: 'Expires',
-      render: (k) => (k.expiresAt ? new Date(k.expiresAt).toLocaleDateString() : 'Never'),
+      key: 'status',
+      header: 'Status',
+      render: (k) =>
+        k.revokedAt ? <Badge tone="danger">Revoked</Badge> : <Badge tone="success">Active</Badge>,
     },
     {
       key: 'actions',
@@ -177,9 +176,6 @@ export function ApiKeysPage() {
             hint="e.g. license.read,license.issue"
           >
             <Input id="ak-scopes" {...form.register('scopes')} />
-          </Field>
-          <Field label="Expires at (optional)" htmlFor="ak-exp">
-            <Input id="ak-exp" type="date" {...form.register('expiresAt')} />
           </Field>
         </form>
       </Dialog>

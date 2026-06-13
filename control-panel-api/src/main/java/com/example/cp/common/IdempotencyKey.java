@@ -72,6 +72,14 @@ public class IdempotencyKey {
     @Column(name = "response_body", columnDefinition = "text")
     private String responseBody;
 
+    /** Original response {@code Content-Type} so a replay reproduces it (not just a JSON guess). */
+    @Column(name = "response_content_type", length = 128)
+    private String responseContentType;
+
+    /** Original response {@code Location} header (e.g. for a {@code 201 Created}) so a replay reproduces it. */
+    @Column(name = "response_location", length = 2048)
+    private String responseLocation;
+
     @Column(name = "created_at", nullable = false)
     private OffsetDateTime createdAt;
 

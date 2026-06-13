@@ -24,8 +24,10 @@ import java.util.Map;
  * A single static master key can never be rotated without re-encrypting (or losing) every blob it
  * ever protected. To allow KEK rotation, every ciphertext we produce now carries the id of the KEK
  * that encrypted it, so old rows keep decrypting under the old KEK while new rows use the active one.
- * {@link KeyService#rotateKek()} walks {@code signing_keys} and re-encrypts each private key under the
- * active KEK.
+ * {@link KeyService#rotateKek()} walks EVERY column that stores a blob from this class (signing keys,
+ * TOTP secrets, webhook HMAC secrets, OIDC client secrets) and re-encrypts each under the active KEK,
+ * and a startup drop-guard refuses to run if any stored blob references a KEK that is no longer
+ * configured (which would make it permanently undecryptable).
  *
  * <h2>Configuration</h2>
  * KEKs are configured as {@code app.signing.master-keys} entries of the form {@code id:base64key}
@@ -43,9 +45,11 @@ import java.util.Map;
  * </ul>
  * {@link #decrypt(byte[])} first attempts a versioned parse; if the blob does not present a
  * self-consistent versioned envelope whose KEK id is known, it falls back to the legacy layout under
- * the default KEK. (A legacy IV whose first byte happens to equal the magic still falls back safely
- * because its declared id length / total length will not be self-consistent, or the parsed id will be
- * unknown.)
+ * the default KEK. (A legacy IV whose first byte happens to equal the magic still falls back safely:
+ * either its declared id length / total length is not self-consistent so it is treated as legacy, or
+ * it parses as a self-consistent-but-bogus envelope whose KEK id is unknown — in which case decrypt
+ * still retries the legacy layout under the default KEK before giving up. The GCM tag guarantees a
+ * wrong interpretation fails authentication rather than returning garbage.)
  */
 @Component
 public class KeyEncryptor {
@@ -211,12 +215,49 @@ public class KeyEncryptor {
             if (key != null) {
                 return decryptWith(key, v.iv, v.ct, "KEK '" + v.kekId + "'");
             }
-            // Self-consistent envelope but unknown KEK id: this is a genuine misconfiguration
-            // (the KEK that wrote it is no longer present), not a legacy blob — surface it.
+            // Self-consistent versioned PARSE but an unknown KEK id. Two cases collapse here:
+            //   (a) a genuine versioned blob written under a KEK that is no longer configured, or
+            //   (b) a LEGACY unversioned blob whose first plaintext byte happened to equal the magic
+            //       0x01 AND whose ensuing bytes happened to parse as a self-consistent (but bogus)
+            //       envelope — roughly 1/1400–1/2200 of pre-versioning blobs.
+            // Previously (b) threw, leaving those legacy blobs temporarily undecryptable. Recover by
+            // falling back to the legacy layout under the default KEK; the GCM tag makes a wrong
+            // interpretation fail authentication, so a real case-(a) blob still fails cleanly (and we
+            // re-surface the clear "unknown KEK id" error rather than the opaque legacy GCM failure).
+            if (keks.containsKey(DEFAULT_KEK_ID)) {
+                try {
+                    return decryptLegacy(blob);
+                } catch (RuntimeException legacyFailure) {
+                    // Not a recoverable legacy blob either — surface the precise misconfiguration.
+                    throw new IllegalStateException(
+                            "Encrypted blob references unknown KEK id '" + v.kekId
+                                    + "' and is not a decryptable legacy blob; configure the KEK in app.signing.master-keys",
+                            legacyFailure);
+                }
+            }
             throw new IllegalStateException(
                     "Encrypted blob references unknown KEK id '" + v.kekId + "'; configure it in app.signing.master-keys");
         }
         return decryptLegacy(blob);
+    }
+
+    /**
+     * Returns the KEK id a stored blob references, or {@link #DEFAULT_KEK_ID} for a legacy unversioned
+     * blob (which can only have been written under the default KEK). Does NOT decrypt — used by the
+     * KEK drop-guard to detect blobs still pinned to a KEK that is about to be removed. A blob whose
+     * versioned header is self-consistent but references an unconfigured id reports that (unknown) id.
+     */
+    public String referencedKekId(byte[] blob) {
+        if (blob == null || blob.length <= IV_LEN) {
+            throw new IllegalArgumentException("Encrypted blob too short");
+        }
+        Versioned v = tryParseVersioned(blob);
+        return v != null ? v.kekId : DEFAULT_KEK_ID;
+    }
+
+    /** The set of KEK ids currently configured (every id that can still DECRYPT existing blobs). */
+    public java.util.Set<String> configuredKekIds() {
+        return java.util.Collections.unmodifiableSet(keks.keySet());
     }
 
     /** Legacy layout: [IV (12)][ct||tag], decrypted under the reserved default KEK. */

@@ -28,8 +28,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Pure, hermetic unit tests for {@link OutboxPublisher}: no Spring context and no database. The
- * single collaborator ({@link JdbcTemplate}) is a Mockito mock, so the claim query is stubbed to
+ * Pure, hermetic unit tests for {@link OutboxDeliveryScheduler}: no Spring context and no database.
+ * The single collaborator ({@link JdbcTemplate}) is a Mockito mock, so the claim query is stubbed to
  * return synthetic rows and the per-row {@code UPDATE} statements are asserted via captured SQL.
  *
  * <p>Covered:
@@ -40,18 +40,19 @@ import static org.mockito.Mockito.when;
  *   <li>a failed notify increments {@code attempts}, records {@code last_error}, and schedules a
  *       retry ({@code next_attempt_at}) while the row stays {@code PENDING};</li>
  *   <li>a row already on its last attempt is quarantined as {@code FAILED} (poison message);</li>
+ *   <li>the retention sweep only deletes terminal rows older than the window;</li>
  *   <li>capped exponential backoff math.</li>
  * </ul>
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
-class OutboxPublisherTest {
+class OutboxDeliverySchedulerTest {
 
     @Mock
     private JdbcTemplate jdbc;
 
-    private OutboxPublisher publisher() {
-        return new OutboxPublisher(jdbc);
+    private OutboxDeliveryScheduler scheduler() {
+        return new OutboxDeliveryScheduler(jdbc, Duration.ofDays(30));
     }
 
     // ------------------------------------------------------------------
@@ -63,7 +64,7 @@ class OutboxPublisherTest {
     void claimQuery_isPendingDueOrderedAndSkipLocked() {
         when(jdbc.query(anyString(), any(RowMapper.class))).thenReturn(List.of());
 
-        publisher().publishBatch();
+        scheduler().publishBatch();
 
         ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
         verify(jdbc).query(sql.capture(), any(RowMapper.class));
@@ -84,10 +85,10 @@ class OutboxPublisherTest {
     @SuppressWarnings("unchecked")
     void successfulNotify_marksPublished() {
         UUID id = UUID.randomUUID();
-        OutboxPublisherTestRows.stub(jdbc, new OutboxPublisherTestRows.Row(id, "subscription.created", 0));
+        OutboxDeliverySchedulerTestRows.stub(jdbc, new OutboxDeliverySchedulerTestRows.Row(id, "subscription.created", 0));
         // pg_notify + the PUBLISHED update both succeed (mock returns 0 by default).
 
-        publisher().publishBatch();
+        scheduler().publishBatch();
 
         // The PUBLISHED update is issued for this row's id.
         verify(jdbc).update(contains("status = 'PUBLISHED'"),
@@ -104,12 +105,12 @@ class OutboxPublisherTest {
     @SuppressWarnings("unchecked")
     void notifyFailure_belowMax_schedulesRetryAndStaysPending() {
         UUID id = UUID.randomUUID();
-        OutboxPublisherTestRows.stub(jdbc, new OutboxPublisherTestRows.Row(id, "subscription.created", 0));
+        OutboxDeliverySchedulerTestRows.stub(jdbc, new OutboxDeliverySchedulerTestRows.Row(id, "subscription.created", 0));
         // Make pg_notify throw; the retry UPDATE (4 args) must then succeed.
         when(jdbc.query(eq("SELECT pg_notify(?, ?)"), any(ResultSetExtractor.class), anyString(), anyString()))
                 .thenThrow(new RuntimeException("broker down"));
 
-        publisher().publishBatch();
+        scheduler().publishBatch();
 
         // attempts incremented to 1, last_error + next_attempt_at set, status NOT changed to FAILED.
         verify(jdbc).update(
@@ -128,15 +129,15 @@ class OutboxPublisherTest {
     void notifyFailure_atMaxAttempts_quarantinesAsFailed() {
         UUID id = UUID.randomUUID();
         // attempts already MAX-1 so this failure becomes the MAX'th and trips the poison cap.
-        OutboxPublisherTestRows.stub(jdbc,
-                new OutboxPublisherTestRows.Row(id, "subscription.created", OutboxPublisher.MAX_ATTEMPTS - 1));
+        OutboxDeliverySchedulerTestRows.stub(jdbc,
+                new OutboxDeliverySchedulerTestRows.Row(id, "subscription.created", OutboxDeliveryScheduler.MAX_ATTEMPTS - 1));
         when(jdbc.query(eq("SELECT pg_notify(?, ?)"), any(ResultSetExtractor.class), anyString(), anyString()))
                 .thenThrow(new RuntimeException("still down"));
 
-        publisher().publishBatch();
+        scheduler().publishBatch();
 
         verify(jdbc).update(contains("status = 'FAILED'"),
-                eq(OutboxPublisher.MAX_ATTEMPTS), contains("still down"), eq(id));
+                eq(OutboxDeliveryScheduler.MAX_ATTEMPTS), contains("still down"), eq(id));
         verify(jdbc, never()).update(contains("next_attempt_at = ?"),
                 any(), any(), any(), eq(id));
     }
@@ -146,17 +147,38 @@ class OutboxPublisherTest {
     void oneBadRow_doesNotAbortTheRest() {
         UUID bad = UUID.randomUUID();
         UUID good = UUID.randomUUID();
-        OutboxPublisherTestRows.stub(jdbc,
-                new OutboxPublisherTestRows.Row(bad, "a.evt", 0),
-                new OutboxPublisherTestRows.Row(good, "b.evt", 0));
+        OutboxDeliverySchedulerTestRows.stub(jdbc,
+                new OutboxDeliverySchedulerTestRows.Row(bad, "a.evt", 0),
+                new OutboxDeliverySchedulerTestRows.Row(good, "b.evt", 0));
         // Fail notify only for the first row's payload (contains its id), succeed for the rest.
         when(jdbc.query(eq("SELECT pg_notify(?, ?)"), any(ResultSetExtractor.class), any(), contains(bad.toString())))
                 .thenThrow(new RuntimeException("boom"));
 
-        publisher().publishBatch();
+        scheduler().publishBatch();
 
         // good row still published despite bad row failing.
         verify(jdbc).update(contains("status = 'PUBLISHED'"), any(), eq(good));
+    }
+
+    // ------------------------------------------------------------------
+    //  Retention sweep
+    // ------------------------------------------------------------------
+
+    @Test
+    void purge_deletesOnlyTerminalRowsOlderThanWindow() {
+        when(jdbc.update(anyString(), any(java.sql.Timestamp.class))).thenReturn(3);
+
+        scheduler().purgeOldEvents();
+
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).update(sql.capture(), any(java.sql.Timestamp.class));
+        String q = sql.getValue();
+        assertThat(q).contains("DELETE FROM outbox_events");
+        // Only delivered/quarantined rows are purged; PENDING rows are never removed.
+        assertThat(q).contains("status IN ('PUBLISHED', 'FAILED')");
+        // Only rows the webhook fan-out has already considered are eligible (never lose an event).
+        assertThat(q).contains("fanned_out_at IS NOT NULL");
+        assertThat(q).contains("occurred_at < ?");
     }
 
     // ------------------------------------------------------------------
@@ -171,15 +193,15 @@ class OutboxPublisherTest {
             "4, 40000",
     })
     void backoff_isExponentialFromBase(int attempts, long expectedMillis) {
-        assertThat(OutboxPublisher.backoff(attempts)).isEqualTo(Duration.ofMillis(expectedMillis));
+        assertThat(OutboxDeliveryScheduler.backoff(attempts)).isEqualTo(Duration.ofMillis(expectedMillis));
     }
 
     @Test
     void backoff_isCappedAtOneHour() {
         // Large attempt counts must not overflow and must saturate at the cap.
-        assertThat(OutboxPublisher.backoff(30)).isEqualTo(OutboxPublisher.BACKOFF_CAP);
-        assertThat(OutboxPublisher.backoff(1000)).isEqualTo(OutboxPublisher.BACKOFF_CAP);
-        assertThat(OutboxPublisher.BACKOFF_CAP).isEqualTo(Duration.ofHours(1));
+        assertThat(OutboxDeliveryScheduler.backoff(30)).isEqualTo(OutboxDeliveryScheduler.BACKOFF_CAP);
+        assertThat(OutboxDeliveryScheduler.backoff(1000)).isEqualTo(OutboxDeliveryScheduler.BACKOFF_CAP);
+        assertThat(OutboxDeliveryScheduler.BACKOFF_CAP).isEqualTo(Duration.ofHours(1));
     }
 
     @Test

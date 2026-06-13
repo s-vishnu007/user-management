@@ -23,7 +23,9 @@ export function AppRoutes() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/password-reset/request" element={<PasswordResetRequestPage />} />
-      <Route path="/password-reset/confirm/:token" element={<PasswordResetConfirmPage />} />
+      {/* Token is passed as a query param (?token=...), not in the path, to keep it out of
+          referrer headers / server access logs / browser history path segments. */}
+      <Route path="/password-reset/confirm" element={<PasswordResetConfirmPage />} />
       <Route
         element={
           <ProtectedRoute>

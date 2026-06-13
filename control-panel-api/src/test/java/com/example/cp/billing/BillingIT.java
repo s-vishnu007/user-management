@@ -15,6 +15,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
@@ -65,6 +68,18 @@ class BillingIT extends AbstractIntegrationTest {
                 .build());
     }
 
+    /** Start of the current UTC month — the period boundary {@code usage_quotas} are bucketed under and
+     *  the default period {@code generate} bills. */
+    private static OffsetDateTime currentMonthStart() {
+        return OffsetDateTime.now(ZoneOffset.UTC).withDayOfMonth(1).truncatedTo(ChronoUnit.DAYS);
+    }
+
+    /** Seeds a quota row in the given UTC month bucket ({@code monthStart .. monthStart + 1 month}). */
+    private void seedMonthQuota(UUID subscriptionId, String featureKey, OffsetDateTime monthStart,
+                                BigDecimal consumed) {
+        seedQuota(subscriptionId, featureKey, monthStart, monthStart.plusMonths(1), consumed);
+    }
+
     @Test
     void generate_thenIssue_producesIssuedInvoiceWithLineItemsAndTotal() throws Exception {
         Organization org = seedOrg("Billing Org");
@@ -77,10 +92,9 @@ class BillingIT extends AbstractIntegrationTest {
         ));
         Subscription sub = seedSubscription(org.getId(), plan.getId());
 
-        OffsetDateTime start = OffsetDateTime.now().minusDays(30);
-        OffsetDateTime end = OffsetDateTime.now();
-        seedQuota(sub.getId(), "seats", start, end, new BigDecimal("3"));        // 3 * 5    = 15.00
-        seedQuota(sub.getId(), "api_calls", start, end, new BigDecimal("1000")); // 1000*.01 = 10.00
+        OffsetDateTime month = currentMonthStart();
+        seedMonthQuota(sub.getId(), "seats", month, new BigDecimal("3"));        // 3 * 5    = 15.00
+        seedMonthQuota(sub.getId(), "api_calls", month, new BigDecimal("1000")); // 1000*.01 = 10.00
 
         // Generate a DRAFT invoice for the subscription's current period.
         String generateBody = objectMapper.writeValueAsString(Map.of("subscriptionId", sub.getId().toString()));
@@ -172,8 +186,7 @@ class BillingIT extends AbstractIntegrationTest {
 
         Plan plan = planWithPrices(Map.of("price.seats", "5"));
         Subscription subA = seedSubscription(orgA.getId(), plan.getId());
-        seedQuota(subA.getId(), "seats", OffsetDateTime.now().minusDays(10), OffsetDateTime.now(),
-                new BigDecimal("2"));
+        seedMonthQuota(subA.getId(), "seats", currentMonthStart(), new BigDecimal("2"));
 
         // adminA generates an invoice in org A.
         String body = objectMapper.writeValueAsString(Map.of("subscriptionId", subA.getId().toString()));
@@ -234,8 +247,7 @@ class BillingIT extends AbstractIntegrationTest {
 
         Plan plan = planWithPrices(Map.of("price.seats", "5"));
         Subscription sub = seedSubscription(org.getId(), plan.getId());
-        seedQuota(sub.getId(), "seats", OffsetDateTime.now().minusDays(5), OffsetDateTime.now(),
-                new BigDecimal("4"));
+        seedMonthQuota(sub.getId(), "seats", currentMonthStart(), new BigDecimal("4"));
 
         String body = objectMapper.writeValueAsString(Map.of("subscriptionId", sub.getId().toString()));
         mockMvc.perform(post("/api/v1/orgs/{orgId}/billing/invoices/generate", org.getId())
@@ -244,5 +256,123 @@ class BillingIT extends AbstractIntegrationTest {
                         .content(body))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.totalAmount").value(20.00)); // 4 * 5
+    }
+
+    @Test
+    void generate_billsOnlyTheRequestedPeriod_notLifetimeUsage() throws Exception {
+        Organization org = seedOrg("Period Billing Org");
+        User admin = seedUser("bill-period-" + rnd() + "@example.com", "Period Admin", false);
+        addOrgMember(org.getId(), admin.getId(), OrgMember.Role.ADMIN);
+
+        Plan plan = planWithPrices(Map.of("price.seats", 5));
+        Subscription sub = seedSubscription(org.getId(), plan.getId());
+
+        OffsetDateTime thisMonth = currentMonthStart();
+        OffsetDateTime lastMonth = thisMonth.minusMonths(1);
+        OffsetDateTime twoMonthsAgo = thisMonth.minusMonths(2);
+        // Usage spread across three distinct monthly periods.
+        seedMonthQuota(sub.getId(), "seats", twoMonthsAgo, new BigDecimal("100")); // 500.00 (not billed)
+        seedMonthQuota(sub.getId(), "seats", lastMonth, new BigDecimal("10"));      //  50.00 (explicit)
+        seedMonthQuota(sub.getId(), "seats", thisMonth, new BigDecimal("3"));       //  15.00 (default)
+
+        // Default generate (no period) bills ONLY the current month — never the merged lifetime usage.
+        String defaultBody = objectMapper.writeValueAsString(Map.of("subscriptionId", sub.getId().toString()));
+        mockMvc.perform(post("/api/v1/orgs/{orgId}/billing/invoices/generate", org.getId())
+                        .with(asUser(admin, "billing.read"))
+                        .contentType("application/json")
+                        .content(defaultBody))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.totalAmount").value(15.00))         // 3 * 5, current month only
+                .andExpect(jsonPath("$.lineItems.length()").value(1))
+                .andExpect(jsonPath("$.periodStart").exists());
+
+        // An explicit prior period bills only that period's usage.
+        Map<String, Object> lastMonthReq = new HashMap<>();
+        lastMonthReq.put("subscriptionId", sub.getId().toString());
+        lastMonthReq.put("period", lastMonth.toString());
+        mockMvc.perform(post("/api/v1/orgs/{orgId}/billing/invoices/generate", org.getId())
+                        .with(asUser(admin, "billing.read"))
+                        .contentType("application/json")
+                        .content(objectMapper.writeValueAsString(lastMonthReq)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.totalAmount").value(50.00)); // 10 * 5, last month only
+
+        // Two distinct invoices exist (one per period), neither billing lifetime usage.
+        assertThat(invoiceRepository.findBySubscriptionIdOrderByCreatedAtDesc(sub.getId())).hasSize(2);
+    }
+
+    @Test
+    void generate_isIdempotentPerPeriod_noDoubleBilling() throws Exception {
+        Organization org = seedOrg("Dupe Guard Org");
+        User admin = seedUser("bill-dupe-" + rnd() + "@example.com", "Dupe Admin", false);
+        addOrgMember(org.getId(), admin.getId(), OrgMember.Role.ADMIN);
+
+        Plan plan = planWithPrices(Map.of("price.seats", 5));
+        Subscription sub = seedSubscription(org.getId(), plan.getId());
+        seedMonthQuota(sub.getId(), "seats", currentMonthStart(), new BigDecimal("3")); // 15.00
+
+        String body = objectMapper.writeValueAsString(Map.of("subscriptionId", sub.getId().toString()));
+
+        String first = mockMvc.perform(post("/api/v1/orgs/{orgId}/billing/invoices/generate", org.getId())
+                        .with(asUser(admin, "billing.read"))
+                        .contentType("application/json")
+                        .content(body))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.totalAmount").value(15.00))
+                .andReturn().getResponse().getContentAsString();
+        UUID firstId = UUID.fromString(objectMapper.readTree(first).get("id").asText());
+
+        // A second generate for the same subscription+period returns the SAME invoice (idempotent),
+        // not a fresh one re-billing the period.
+        String second = mockMvc.perform(post("/api/v1/orgs/{orgId}/billing/invoices/generate", org.getId())
+                        .with(asUser(admin, "billing.read"))
+                        .contentType("application/json")
+                        .content(body))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.totalAmount").value(15.00))
+                .andReturn().getResponse().getContentAsString();
+        UUID secondId = UUID.fromString(objectMapper.readTree(second).get("id").asText());
+
+        assertThat(secondId).isEqualTo(firstId);
+        // Exactly one invoice for the subscription — the period was billed once.
+        assertThat(invoiceRepository.findBySubscriptionIdOrderByCreatedAtDesc(sub.getId())).hasSize(1);
+    }
+
+    @Test
+    void voidedInvoice_allowsRegeneratingThePeriod() throws Exception {
+        Organization org = seedOrg("Void Regen Org");
+        User admin = seedUser("bill-void-" + rnd() + "@example.com", "Void Admin", false);
+        addOrgMember(org.getId(), admin.getId(), OrgMember.Role.ADMIN);
+
+        Plan plan = planWithPrices(Map.of("price.seats", 5));
+        Subscription sub = seedSubscription(org.getId(), plan.getId());
+        seedMonthQuota(sub.getId(), "seats", currentMonthStart(), new BigDecimal("2")); // 10.00
+
+        String body = objectMapper.writeValueAsString(Map.of("subscriptionId", sub.getId().toString()));
+        String first = mockMvc.perform(post("/api/v1/orgs/{orgId}/billing/invoices/generate", org.getId())
+                        .with(asUser(admin, "billing.read"))
+                        .contentType("application/json")
+                        .content(body))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        UUID firstId = UUID.fromString(objectMapper.readTree(first).get("id").asText());
+
+        // Void the draft; the (subscription, period) slot frees up (partial unique index on status<>'VOID').
+        mockMvc.perform(post("/api/v1/orgs/{orgId}/billing/invoices/{id}/void", org.getId(), firstId)
+                        .with(asUser(admin, "billing.read")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("VOID"));
+
+        // Re-generating the same period now produces a NEW draft (the voided one no longer occupies it).
+        String regen = mockMvc.perform(post("/api/v1/orgs/{orgId}/billing/invoices/generate", org.getId())
+                        .with(asUser(admin, "billing.read"))
+                        .contentType("application/json")
+                        .content(body))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("DRAFT"))
+                .andReturn().getResponse().getContentAsString();
+        UUID regenId = UUID.fromString(objectMapper.readTree(regen).get("id").asText());
+
+        assertThat(regenId).isNotEqualTo(firstId);
     }
 }

@@ -2,17 +2,18 @@ package com.example.cp.auth;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
-import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.UUID;
 
 /**
  * Redis-backed {@link SessionRevocationStore} using the auto-configured spring-boot-starter-data-redis.
- * Active only when a {@link RedisConnectionFactory} bean exists (the prod path).
+ * Selected (in preference to {@link InMemorySessionRevocationStore}) by {@link SessionRevocationConfig}
+ * when a {@code RedisConnectionFactory} bean is present — wired via {@code ObjectProvider} rather than
+ * {@code @ConditionalOnBean} on a component-scanned bean, which is evaluated before
+ * {@code RedisAutoConfiguration} registers the factory and would silently never match (the original
+ * registration trap, finding P2).
  *
  * <p>Keys:</p>
  * <ul>
@@ -21,11 +22,12 @@ import java.util.UUID;
  * </ul>
  *
  * <p>Fail modes (documented intentionally): {@link #isJtiDenylisted(String)} FAILS CLOSED on a Redis
- * error (treat an outage as "cannot confirm not-revoked"). {@link #currentTokenVersion(UUID)} returns
- * {@code -1} on error so the filter falls back to the durable DB token-version compare.</p>
+ * error (treat an outage as "cannot confirm not-revoked"). {@link #denylistJti(String, Duration)}
+ * propagates a {@link RevocationStoreException} on a Redis error so a logout cannot silently report
+ * success while the jti was never denylisted (the caller maps it to 503 so the client retries).
+ * {@link #currentTokenVersion(UUID)} returns {@code -1} on error so the filter falls back to the
+ * durable DB token-version compare.</p>
  */
-@Component
-@ConditionalOnBean(RedisConnectionFactory.class)
 public class RedisSessionRevocationStore implements SessionRevocationStore {
 
     private static final Logger log = LoggerFactory.getLogger(RedisSessionRevocationStore.class);
@@ -55,7 +57,10 @@ public class RedisSessionRevocationStore implements SessionRevocationStore {
         try {
             redis.opsForValue().set(denylistKey(jti), "1", ttl);
         } catch (Exception e) {
+            // Do NOT swallow: a logout that cannot persist the denylist entry must not report success
+            // (the token would stay valid until exp). Propagate so the caller returns 503 for a retry.
             log.warn("Redis denylistJti failed for jti (suppressed value): {}", e.getMessage());
+            throw new RevocationStoreException("Failed to persist session revocation", e);
         }
     }
 
@@ -96,17 +101,6 @@ public class RedisSessionRevocationStore implements SessionRevocationStore {
         } catch (Exception e) {
             // Fall back to DB compare on error.
             log.warn("Redis currentTokenVersion failed for user {}: {}", userId, e.getMessage());
-            return -1L;
-        }
-    }
-
-    @Override
-    public long bumpTokenVersion(UUID userId) {
-        try {
-            Long v = redis.opsForValue().increment(tokenVerKey(userId));
-            return v == null ? -1L : v;
-        } catch (Exception e) {
-            log.warn("Redis bumpTokenVersion failed for user {}: {}", userId, e.getMessage());
             return -1L;
         }
     }

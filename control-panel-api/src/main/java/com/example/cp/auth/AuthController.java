@@ -159,7 +159,14 @@ public class AuthController {
      * Step 2 of two-step login: completes authentication for an MFA-enabled user by verifying a
      * TOTP code against the challenge issued by {@code /login}, returning the full session token.
      * Public (like {@code /login}) because the caller has no session yet — the bearer of a valid
-     * {@code challenge} + correct {@code code} is the authenticated user.
+     * signed {@code challenge} + correct {@code code} is the authenticated user.
+     *
+     * <p>The signed {@code challenge} is REQUIRED: it is the only proof that the password step
+     * ({@code /login}) succeeded, so MFA stays a true second factor (there is no email-only path
+     * that would collapse 2FA to a single TOTP guess). This endpoint is additionally rate-limited /
+     * lockout-protected (per account + per IP, shared with {@code /login}) so the 6-digit code
+     * cannot be brute-forced: {@link #isLocked} is consulted at entry and every bad code is recorded
+     * as a failure, locking the account after the configured ceiling.</p>
      */
     @PostMapping("/mfa/login")
     @Transactional
@@ -167,20 +174,26 @@ public class AuthController {
                                   HttpServletResponse httpResponse) {
         String ip = proxyResolver.resolveClientIp(request);
 
-        // Resolve the subject either from the signed challenge or, as a fallback, by email lookup.
-        UUID userId;
-        if (body.challenge() != null && !body.challenge().isBlank()) {
-            userId = mfaService.parseChallenge(body.challenge());
-        } else if (body.email() != null && !body.email().isBlank()) {
-            userId = userRepository.findByEmail(body.email().trim())
-                    .map(User::getId)
-                    .orElseThrow(() -> ApiException.unauthorized("Invalid MFA challenge"));
-        } else {
-            throw ApiException.badRequest("A challenge or email is required");
+        // The signed challenge (issued by /login after a valid password) is mandatory — it both
+        // identifies the subject and proves factor one passed. No email-only fallback exists.
+        if (body.challenge() == null || body.challenge().isBlank()) {
+            throw ApiException.badRequest("A signed MFA challenge is required");
         }
+        UUID userId = mfaService.parseChallenge(body.challenge());
 
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> ApiException.unauthorized("Invalid MFA challenge"));
+
+        // Throttle BEFORE verifying the code so an attacker cannot make unlimited TOTP guesses
+        // against an account they hold a (still-valid) challenge for. Consult the lock first.
+        if (loginRateLimiter.isLocked(user.getEmail(), ip)) {
+            auditWriter.record(user.getId(), null, "auth.login.mfa.locked", "user",
+                    user.getId().toString(), Map.of("email", maskEmail(user.getEmail())), ip,
+                    AuditOutcome.DENIED, false);
+            AuditContext.markRecorded();
+            throw ApiException.unauthorized("Too many failed attempts; try again later");
+        }
+
         if (user.getStatus() != User.Status.ACTIVE) {
             recordLoginFailed(user.getId(), user.getEmail(), "inactive", ip);
             throw ApiException.unauthorized("Account is not active");
@@ -220,15 +233,20 @@ public class AuthController {
     }
 
     @PostMapping("/logout")
-    public ResponseEntity<Void> logout(HttpServletRequest request) {
+    public ResponseEntity<Void> logout(HttpServletRequest request, HttpServletResponse httpResponse) {
         // Stateless JWT — denylist the exact jti for its remaining life so the token cannot be reused.
         SecurityUtils.currentUser().ifPresent(u ->
                 AuditContext.setTarget("user", u.userId().toString()));
         AuditContext.set("auth.logout");
 
-        String header = request.getHeader(HttpHeaders.AUTHORIZATION);
-        if (header != null && header.startsWith(BEARER)) {
-            String token = header.substring(BEARER.length()).trim();
+        // Resolve the session token with the SAME precedence as JwtAuthFilter: Bearer header first,
+        // else the cp_session cookie (the only credential a post-SSO browser holds). Without this a
+        // cookie/SSO session could never be revoked via logout.
+        String token = bearerToken(request);
+        if (token == null) {
+            token = sessionCookie(request);
+        }
+        if (token != null && !token.isBlank()) {
             try {
                 SessionTokenService.ParsedToken parsed = tokenService.parse(token);
                 if (parsed.jti() != null && parsed.expiresAt() != null) {
@@ -239,9 +257,46 @@ public class AuthController {
                 }
             } catch (ApiException ignored) {
                 // Token expired/invalid: logout is idempotent — nothing to denylist.
+            } catch (RevocationStoreException e) {
+                // The denylist write could not be persisted (e.g. Redis outage). Do NOT report a
+                // successful logout while the token stays valid — return 503 so the client retries.
+                AuditContext.setOutcome(AuditOutcome.FAILED);
+                throw new ApiException(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE,
+                        "Service Unavailable", "Could not revoke the session; please retry");
             }
         }
+
+        // Always clear the cp_session cookie (Max-Age=0) so the browser drops it even when the jti
+        // was already denylisted/expired. Mirrors the attributes set on login so the browser matches.
+        ResponseCookie expired = ResponseCookie.from("cp_session", "")
+                .httpOnly(true).secure(cookieSecure).sameSite("Lax").path("/")
+                .maxAge(0)
+                .build();
+        httpResponse.addHeader(HttpHeaders.SET_COOKIE, expired.toString());
         return ResponseEntity.noContent().build();
+    }
+
+    /** The Bearer token from the Authorization header, or {@code null} when absent. */
+    private static String bearerToken(HttpServletRequest request) {
+        String header = request.getHeader(HttpHeaders.AUTHORIZATION);
+        if (header != null && header.startsWith(BEARER)) {
+            return header.substring(BEARER.length()).trim();
+        }
+        return null;
+    }
+
+    /** The value of the cp_session cookie, or {@code null} when it is not present. */
+    private static String sessionCookie(HttpServletRequest request) {
+        jakarta.servlet.http.Cookie[] cookies = request.getCookies();
+        if (cookies == null) {
+            return null;
+        }
+        for (jakarta.servlet.http.Cookie c : cookies) {
+            if ("cp_session".equals(c.getName())) {
+                return c.getValue();
+            }
+        }
+        return null;
     }
 
     @PostMapping("/password-reset/request")
@@ -392,8 +447,7 @@ public class AuthController {
     }
 
     public record MfaLoginRequest(
-            @Email String email,
-            String challenge,
+            @NotBlank String challenge,
             @NotBlank String code) {}
 
     public record PasswordResetRequest(@NotBlank @Email String email) {}

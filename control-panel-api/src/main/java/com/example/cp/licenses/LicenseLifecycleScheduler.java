@@ -6,7 +6,7 @@ import com.example.cp.subscriptions.SubscriptionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -41,18 +41,26 @@ public class LicenseLifecycleScheduler {
     private final LicenseTokenRepository tokenRepo;
     private final SubscriptionRepository subRepo;
     private final OutboxPublisher outbox;
-    private final JdbcTemplate jdbc;
     private final Duration expiryWarning;
+
+    /**
+     * Self-reference (Spring proxy) so the {@code @Scheduled} entry point invokes the
+     * {@code @Transactional} sweep methods THROUGH the proxy. A plain self-invocation would bypass
+     * the transactional advice, so the expiry transition and its outbox inserts would not commit
+     * atomically (audit P2 proxy-bypass). Injected {@code @Lazy} to break the self-cycle, mirroring
+     * {@code AuditWriter}.
+     */
+    private final LicenseLifecycleScheduler self;
 
     public LicenseLifecycleScheduler(LicenseTokenRepository tokenRepo,
                                      SubscriptionRepository subRepo,
                                      OutboxPublisher outbox,
-                                     JdbcTemplate jdbc,
+                                     @Lazy LicenseLifecycleScheduler self,
                                      @Value("${app.licensing.expiry-warning:P14D}") Duration expiryWarning) {
         this.tokenRepo = tokenRepo;
         this.subRepo = subRepo;
         this.outbox = outbox;
-        this.jdbc = jdbc;
+        this.self = self;
         this.expiryWarning = expiryWarning;
     }
 
@@ -61,8 +69,9 @@ public class LicenseLifecycleScheduler {
             initialDelayString = "${app.licensing.lifecycle.initial-delay:PT1M}")
     public void sweep() {
         try {
-            int expired = expirePastDue();
-            int warned = warnExpiring();
+            // Route through the proxy so the @Transactional boundaries actually apply.
+            int expired = self.expirePastDue();
+            int warned = self.warnExpiring();
             if (expired > 0 || warned > 0) {
                 log.info("License lifecycle sweep: expired={} expiring-warned={}", expired, warned);
             }
@@ -71,35 +80,48 @@ public class LicenseLifecycleScheduler {
         }
     }
 
-    /** Transitions ACTIVE tokens past their expiry to EXPIRED and emits a license.expired event each. */
+    /**
+     * Transitions ACTIVE tokens past their expiry to EXPIRED and emits one {@code license.expired}
+     * event each. The transition and the outbox inserts run in a SINGLE transaction so they commit
+     * atomically. The payloads are gathered before the set-based UPDATE; the UPDATE itself is one
+     * guarded statement so concurrent sweeps cannot double-transition (audit P2).
+     */
     @Transactional
     public int expirePastDue() {
         OffsetDateTime now = OffsetDateTime.now();
+        // Snapshot the overdue tokens first (for the per-token event payloads) ...
         List<LicenseToken> overdue =
                 tokenRepo.findByStatusAndExpiresAtLessThanEqual(LicenseToken.Status.ACTIVE, now);
+        if (overdue.isEmpty()) {
+            return 0;
+        }
+        // ... then transition them atomically in one guarded set-based UPDATE.
+        int transitioned = tokenRepo.markExpiredPastDue(
+                now, LicenseToken.Status.ACTIVE, LicenseToken.Status.EXPIRED);
         for (LicenseToken token : overdue) {
-            token.setStatus(LicenseToken.Status.EXPIRED);
-            tokenRepo.save(token);
             outbox.publish("license_token", token.getJti(), "license.expired",
                     eventPayload(token, now));
         }
-        return overdue.size();
+        return transitioned;
     }
 
     /**
-     * Emits a license.expiring warning for ACTIVE tokens expiring within the warning window that
-     * have not already been warned. Does NOT change token status.
+     * Emits a {@code license.expiring} warning for ACTIVE tokens expiring within the warning window
+     * that have not already been warned. Dedup is durable: each token's warning is CLAIMED via a
+     * conditional UPDATE on {@code expiring_warned_at} (NULL -> now), so a token is warned at most
+     * once even across concurrent/duplicate sweeps and after the outbox is purged (audit P2). Does
+     * NOT change token status.
      */
     @Transactional
     public int warnExpiring() {
         OffsetDateTime now = OffsetDateTime.now();
         OffsetDateTime windowEnd = now.plus(expiryWarning);
         List<LicenseToken> expiring = tokenRepo
-                .findByStatusAndExpiresAtGreaterThanAndExpiresAtLessThanEqual(
-                        LicenseToken.Status.ACTIVE, now, windowEnd);
+                .findExpiringNotYetWarned(LicenseToken.Status.ACTIVE, now, windowEnd);
         int warned = 0;
         for (LicenseToken token : expiring) {
-            if (alreadyWarned(token.getJti())) {
+            // Claim the warning atomically; only the winner emits the event.
+            if (tokenRepo.claimExpiringWarning(token.getJti(), now) == 0) {
                 continue;
             }
             outbox.publish("license_token", token.getJti(), "license.expiring",
@@ -107,14 +129,6 @@ public class LicenseLifecycleScheduler {
             warned++;
         }
         return warned;
-    }
-
-    private boolean alreadyWarned(String jti) {
-        Long count = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM outbox_events WHERE aggregate_type = ? AND aggregate_id = ? "
-                        + "AND event_type = ?",
-                Long.class, "license_token", jti, "license.expiring");
-        return count != null && count > 0;
     }
 
     private Map<String, Object> eventPayload(LicenseToken token, OffsetDateTime now) {

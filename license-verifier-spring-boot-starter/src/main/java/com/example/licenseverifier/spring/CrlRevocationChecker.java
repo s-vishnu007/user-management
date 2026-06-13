@@ -102,11 +102,26 @@ public class CrlRevocationChecker implements RevocationChecker {
                         "CRL endpoint returned HTTP " + response.statusCode());
             }
             RevocationList rl = crlVerifier.verify(response.body());
+            RevocationList previous = current.get();
+            if (isRollback(previous, rl)) {
+                // Monotonicity guard: a validly-signed but OLDER CRL must not replace a newer
+                // cached one. A MITM / caching proxy / stale mirror could otherwise replay a
+                // previously-signed CRL that omits a recently-revoked jti, silently suppressing
+                // that revocation until the cached list goes stale. Keep the newer cached CRL.
+                log.warn(
+                        "Rejected CRL from {} as a rollback: fetched issuedAt={} is older than "
+                                + "cached issuedAt={}; keeping the newer cached CRL.",
+                        properties.getCrlUrl(),
+                        rl.issuedAt(),
+                        previous.issuedAt());
+                return;
+            }
             current.set(rl);
             log.debug(
-                    "Refreshed CRL from {}: issuer={}, nextUpdate={}, revokedCount={}",
+                    "Refreshed CRL from {}: issuer={}, issuedAt={}, nextUpdate={}, revokedCount={}",
                     properties.getCrlUrl(),
                     rl.issuer(),
+                    rl.issuedAt(),
                     rl.nextUpdate(),
                     rl.revokedJtis().size());
         } catch (InterruptedException e) {
@@ -133,6 +148,22 @@ public class CrlRevocationChecker implements RevocationChecker {
                     properties.getCrlUrl(),
                     e);
         }
+    }
+
+    /**
+     * @return {@code true} if {@code fetched} is a rollback relative to {@code cached}, i.e. both
+     *         carry an {@code issuedAt} and the fetched one is strictly older. A fetched CRL with
+     *         no {@code issuedAt} cannot be proven newer, so it is also treated as a rollback when
+     *         a cached list with a known {@code issuedAt} exists.
+     */
+    private static boolean isRollback(RevocationList cached, RevocationList fetched) {
+        if (cached == null || cached.issuedAt() == null) {
+            return false;
+        }
+        if (fetched.issuedAt() == null) {
+            return true;
+        }
+        return fetched.issuedAt().isBefore(cached.issuedAt());
     }
 
     @Override

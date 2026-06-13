@@ -83,7 +83,9 @@ export function OrgsListPage() {
         title="Organizations"
         description="Each customer is an organization. Subscriptions and licenses live under one."
         actions={
-          <PermissionGate permission="org.create">
+          // Aligned to the authority the create endpoint actually enforces (org.write), not the
+          // non-enforced org.create code (finding P3: UI gate codes diverged from authorities).
+          <PermissionGate permission="org.write">
             <Button onClick={() => setOpenCreate(true)}>New organization</Button>
           </PermissionGate>
         }

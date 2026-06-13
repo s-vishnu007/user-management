@@ -7,7 +7,11 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.3.4</version>
+        <!-- Final patch of the 3.3.x line (3.3.x OSS support ended 2025-06-30). Staying on the
+             same minor keeps Tomcat/Spring/Security/logback at their latest 3.3-managed patches
+             with minimal regression risk. A move to a supported line (3.4/3.5) is tracked
+             separately (it also migrates SAML off the EOL OpenSAML 4 stack) and is out of scope here. -->
+        <version>3.3.13</version>
         <relativePath/>
     </parent>
 
@@ -39,12 +43,20 @@
         <totp.version>1.7.1</totp.version>
         <logstash-logback-encoder.version>7.4</logstash-logback-encoder.version>
         <testcontainers.version>1.20.3</testcontainers.version>
-        <postgresql.version>42.7.4</postgresql.version>
+        <!-- Bumped 42.7.4 -> 42.7.7 to pick up the latest pgjdbc security/bugfix patches
+             (covers CVE-2025-49146 et al). Same 42.7.x line, drop-in compatible. -->
+        <postgresql.version>42.7.7</postgresql.version>
+        <!-- Explicit SCA-hygiene overrides for transitive dependencies that Spring Boot 3.3.13
+             still manages at vulnerable versions:
+             - json-smart < 2.5.2 (CVE-2024-57699, pulled in transitively via nimbus/oauth2)
+             - bouncycastle bcprov-jdk18on < 1.78 (pulled in via OpenSAML / spring-security-saml2) -->
+        <json-smart.version>2.5.2</json-smart.version>
+        <bouncycastle.version>1.78.1</bouncycastle.version>
         <uuid-creator.version>6.0.0</uuid-creator.version>
         <aspectjweaver.version>1.9.22.1</aspectjweaver.version>
         <tink.version>1.13.0</tink.version>
         <jacoco-maven-plugin.version>0.8.14</jacoco-maven-plugin.version>
-        <!-- Override Spring Boot 3.3.4's managed byte-buddy (1.14.x) so Mockito can instrument
+        <!-- Override Spring Boot 3.3.x's managed byte-buddy (1.14.x) so Mockito can instrument
              under newer JDKs (e.g. JDK 24) used for local builds. Backward-compatible with JDK 21. -->
         <byte-buddy.version>1.18.8</byte-buddy.version>
     </properties>
@@ -82,6 +94,28 @@
                 <groupId>org.postgresql</groupId>
                 <artifactId>postgresql</artifactId>
                 <version>${postgresql.version}</version>
+            </dependency>
+
+            <!-- SCA override: json-smart >= 2.5.2 (CVE-2024-57699). Arrives transitively through
+                 the OAuth2/JWT stack; pin it here so every module resolves the patched version. -->
+            <dependency>
+                <groupId>net.minidev</groupId>
+                <artifactId>json-smart</artifactId>
+                <version>${json-smart.version}</version>
+            </dependency>
+
+            <!-- SCA override: BouncyCastle >= 1.78 (DoS/timing/LDAP CVEs in 1.72). Arrives
+                 transitively through OpenSAML / spring-security-saml2. Pin both the provider and
+                 the PKIX jars so they stay on the same patched coordinate set. -->
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcprov-jdk18on</artifactId>
+                <version>${bouncycastle.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcpkix-jdk18on</artifactId>
+                <version>${bouncycastle.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.github.f4b6a3</groupId>

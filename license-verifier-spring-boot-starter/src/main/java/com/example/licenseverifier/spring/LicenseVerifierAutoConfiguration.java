@@ -6,6 +6,8 @@ import com.example.licenseverifier.PublicKeyProvider;
 import com.example.licenseverifier.RevocationChecker;
 import com.example.licenseverifier.spring.actuate.LicenseEndpoint;
 import org.aspectj.lang.annotation.Aspect;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -20,6 +22,8 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableConfigurationProperties(LicenseProperties.class)
 @EnableScheduling
 public class LicenseVerifierAutoConfiguration {
+
+    private static final Logger log = LoggerFactory.getLogger(LicenseVerifierAutoConfiguration.class);
 
     /**
      * Shared JWKS provider, built once so the {@link LicenseVerifier} and the CRL-backed
@@ -54,6 +58,22 @@ public class LicenseVerifierAutoConfiguration {
     public RevocationChecker revocationChecker(
             LicenseProperties props, ObjectProvider<PublicKeyProvider> keyProvider) {
         if (props.getCrlUrl() == null || props.getCrlUrl().isBlank()) {
+            // Revocation off. In strict mode this is almost certainly a misconfiguration: an
+            // offline-license product has the CRL as its ONLY enforcement channel, so refuse to
+            // start rather than silently shipping an app that can never deny a revoked license.
+            if (props.isStrict()) {
+                throw new IllegalStateException(
+                        "app.license.crl-url is not configured but app.license.strict=true: "
+                                + "revocation checking is the only channel that can deny a revoked "
+                                + "license offline. Set app.license.crl-url to the control panel's "
+                                + "signed-CRL endpoint, or set app.license.strict=false to "
+                                + "explicitly accept running with revocation disabled.");
+            }
+            log.warn(
+                    "app.license.crl-url is not configured: license REVOCATION CHECKING IS "
+                            + "DISABLED (RevocationChecker.none()). Revoked licenses will continue "
+                            + "to verify until they expire. Set app.license.crl-url to the control "
+                            + "panel's signed-CRL endpoint to enable revocation.");
             return RevocationChecker.none();
         }
         CrlVerifier crl = new CrlVerifier(keyProvider.getObject(), props.getIssuer());

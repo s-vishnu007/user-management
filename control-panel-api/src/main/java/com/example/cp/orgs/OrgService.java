@@ -134,17 +134,39 @@ public class OrgService {
         };
     }
 
+    /**
+     * Removes {@code userId} from {@code orgId}.
+     *
+     * <p>{@code actorRole} is the removing principal's effective role in this org (super-admins pass
+     * {@code OWNER} and set {@code superAdmin=true}). Mirrors the actor-vs-target rank guard already
+     * enforced in {@link #addMember}: a non-super actor may only remove a member of strictly LOWER
+     * rank than its own, so an ADMIN can no longer remove an OWNER (or a peer ADMIN). The last-OWNER
+     * guard is enforced via a single conditional delete to avoid the count-then-delete race (P3).
+     */
     @Transactional
-    public void removeMember(UUID orgId, UUID userId) {
+    public void removeMember(UUID orgId, UUID userId, OrgMember.Role actorRole, boolean superAdmin) {
         OrgMember m = memberRepository.findByOrgIdAndUserId(orgId, userId)
                 .orElseThrow(() -> ApiException.notFound("Member not found"));
-        if (m.getRole() == OrgMember.Role.OWNER) {
-            long owners = memberRepository.countByOrgIdAndRole(orgId, OrgMember.Role.OWNER);
-            if (owners <= 1) {
-                throw ApiException.badRequest("Cannot remove the last OWNER");
+        if (!superAdmin) {
+            if (actorRole == null) {
+                throw ApiException.forbidden("Not a member of this organization");
+            }
+            // A non-super actor may only remove members ranked strictly below itself. This blocks an
+            // ADMIN from removing an OWNER (and an ADMIN from removing a peer ADMIN).
+            if (rank(m.getRole()) >= rank(actorRole)) {
+                throw ApiException.forbidden("Cannot remove a member whose role equals or outranks your own");
             }
         }
-        memberRepository.deleteByOrgIdAndUserId(orgId, userId);
+        // Conditional delete: removes the row only if it is not the org's last OWNER, evaluated
+        // atomically within the statement. removed == 0 means either the member vanished concurrently
+        // or it was the last OWNER.
+        int removed = memberRepository.deleteMemberUnlessLastOwner(orgId, userId, OrgMember.Role.OWNER);
+        if (removed == 0) {
+            if (m.getRole() == OrgMember.Role.OWNER) {
+                throw ApiException.badRequest("Cannot remove the last OWNER");
+            }
+            throw ApiException.notFound("Member not found");
+        }
         AuditContext.set("org.member.removed");
         AuditContext.setTarget("org_member", orgId + ":" + userId);
     }

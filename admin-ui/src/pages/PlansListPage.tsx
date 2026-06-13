@@ -33,7 +33,7 @@ export function PlansListPage() {
   const form = useForm<Values>({ resolver: zodResolver(schema), defaultValues: { name: '', code: '' } });
 
   const createMut = useMutation({
-    mutationFn: (v: Values) => plans.create({ ...v, permissions: [], features: [] }),
+    mutationFn: (v: Values) => plans.create({ ...v, permissions: [], features: {} }),
     onSuccess: (p) => {
       qc.invalidateQueries({ queryKey: ['plans'] });
       setOpen(false);
@@ -54,14 +54,14 @@ export function PlansListPage() {
     {
       key: 'status',
       header: 'Status',
-      render: (p) => <StatusBadge status={p.status ?? 'ACTIVE'} />,
+      render: (p) => <StatusBadge status={p.active === false ? 'RETIRED' : 'ACTIVE'} />,
     },
     {
       key: 'permissions',
       header: 'Permissions',
       render: (p) => p.permissions?.length ?? 0,
     },
-    { key: 'features', header: 'Features', render: (p) => p.features?.length ?? 0 },
+    { key: 'features', header: 'Features', render: (p) => Object.keys(p.features ?? {}).length },
     {
       key: 'actions',
       header: '',
@@ -80,7 +80,8 @@ export function PlansListPage() {
         title="Plans"
         description="The catalog of subscription tiers. Each plan grants a permission set and feature flags to issued licenses."
         actions={
-          <PermissionGate permission="plan.create">
+          // Plan create enforces plan.write on the backend; gate on the real authority (P3).
+          <PermissionGate permission="plan.write">
             <Button onClick={() => setOpen(true)}>New plan</Button>
           </PermissionGate>
         }

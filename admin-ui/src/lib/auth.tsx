@@ -1,12 +1,30 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { auth, getStoredToken, setStoredToken, setUnauthorizedHandler } from './api';
-import type { User } from './types';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react';
+import { auth, setUnauthorizedHandler } from './api';
+import type { LoginResponse, OrgMembership, User } from './types';
+
+/** Result of a login attempt: either authenticated or an MFA challenge requiring a TOTP step. */
+export type LoginResult =
+  | { mfaRequired: false }
+  | { mfaRequired: true; challenge: string; challengeExpiresAt?: string };
 
 interface AuthCtx {
   user: User | null;
-  accessToken: string | null;
+  permissions: string[];
+  orgs: OrgMembership[];
+  /** True only after the initial cookie-based bootstrap has settled. */
+  ready: boolean;
   loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<LoginResult>;
+  /** Completes an MFA login by exchanging the signed challenge + TOTP code for a session. */
+  completeMfa: (challenge: string, code: string) => Promise<void>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
   hasPermission: (perm: string) => boolean;
@@ -15,68 +33,96 @@ interface AuthCtx {
 const Ctx = createContext<AuthCtx | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [token, setToken] = useState<string | null>(() => getStoredToken());
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState<boolean>(!!getStoredToken());
+  const [permissions, setPermissions] = useState<string[]>([]);
+  const [orgs, setOrgs] = useState<OrgMembership[]>([]);
+  const [ready, setReady] = useState(false);
 
-  const refresh = useCallback(async () => {
-    if (!getStoredToken()) {
-      setUser(null);
-      setLoading(false);
-      return;
-    }
-    try {
-      const me = await auth.me();
-      setUser(me);
-    } catch {
-      setStoredToken(null);
-      setToken(null);
-      setUser(null);
-    } finally {
-      setLoading(false);
-    }
+  const clear = useCallback(() => {
+    setUser(null);
+    setPermissions([]);
+    setOrgs([]);
   }, []);
+
+  // Bootstrap identity purely from the HttpOnly cp_session cookie. This is the ONLY way a
+  // post-SSO browser (which only ever receives the cookie + an ?sso=success redirect) can become
+  // authenticated, and it also restores a session across reloads without persisting any token in
+  // JS-readable storage (finding P1-16 / P2 #32).
+  const refresh = useCallback(async () => {
+    try {
+      const id = await auth.me();
+      setUser(id.user);
+      setPermissions(id.permissions);
+      setOrgs(id.orgs);
+    } catch {
+      clear();
+    } finally {
+      setReady(true);
+    }
+  }, [clear]);
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
-      setToken(null);
-      setUser(null);
+      clear();
     });
-    refresh();
+    void refresh();
+  }, [refresh, clear]);
+
+  const login = useCallback(async (email: string, password: string): Promise<LoginResult> => {
+    const res: LoginResponse = await auth.login(email, password);
+    if (res.mfaRequired) {
+      return {
+        mfaRequired: true,
+        challenge: res.mfaChallenge ?? '',
+        challengeExpiresAt: res.mfaChallengeExpiresAt,
+      };
+    }
+    // Session cookie is set by the backend; load the unified identity envelope from /me so the
+    // permission set (which is NOT on the login UserDto) is available for client-side gating.
+    await refresh();
+    return { mfaRequired: false };
   }, [refresh]);
 
-  const login = useCallback(async (email: string, password: string) => {
-    const res = await auth.login(email, password);
-    setStoredToken(res.accessToken);
-    setToken(res.accessToken);
-    setUser(res.user);
-  }, []);
+  const completeMfa = useCallback(async (challenge: string, code: string) => {
+    await auth.mfaLogin(challenge, code);
+    await refresh();
+  }, [refresh]);
 
   const logout = useCallback(async () => {
     try {
       await auth.logout();
     } catch {
-      // ignore
+      // ignore — logout is best-effort client-side; the backend clears the cookie/denylists jti.
     }
-    setStoredToken(null);
-    setToken(null);
-    setUser(null);
-  }, []);
+    clear();
+  }, [clear]);
 
   const hasPermission = useCallback(
     (perm: string) => {
       if (!user) return false;
-      const perms = user.permissions ?? [];
-      if (perms.includes('*') || perms.includes(perm)) return true;
-      // role-based fallback: SUPER_ADMIN gets everything
-      return (user.roles ?? []).some((r) => r.code === 'SUPER_ADMIN');
+      if (user.superAdmin) return true;
+      // The /me authority set lists every granted permission code; a super-admin additionally
+      // carries the literal "SUPER_ADMIN" authority (and "*" if the backend ever emits it).
+      if (permissions.includes('SUPER_ADMIN') || permissions.includes('*')) return true;
+      return permissions.includes(perm);
     },
-    [user],
+    [user, permissions],
   );
 
   const value = useMemo<AuthCtx>(
-    () => ({ user, accessToken: token, loading, login, logout, refresh, hasPermission }),
-    [user, token, loading, login, logout, refresh, hasPermission],
+    () => ({
+      user,
+      permissions,
+      orgs,
+      ready,
+      loading: !ready,
+      login,
+      completeMfa,
+      logout,
+      refresh,
+      hasPermission,
+    }),
+    [user, permissions, orgs, ready, login, completeMfa, logout, refresh, hasPermission],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

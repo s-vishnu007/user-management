@@ -1,7 +1,7 @@
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useState } from 'react';
 import { auth } from '@/lib/api';
 import { apiErrorMessage } from '@/lib/api';
@@ -19,7 +19,8 @@ const schema = z
 type Values = z.infer<typeof schema>;
 
 export function PasswordResetConfirmPage() {
-  const { token } = useParams<{ token: string }>();
+  const [searchParams] = useSearchParams();
+  const token = searchParams.get('token') ?? undefined;
   const navigate = useNavigate();
   const form = useForm<Values>({ resolver: zodResolver(schema), defaultValues: { newPassword: '', confirm: '' } });
   const [error, setError] = useState<string | null>(null);

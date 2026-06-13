@@ -78,9 +78,10 @@ public class SecurityConfig {
 
     @Bean
     public RateLimitFilter rateLimitFilter(ObjectMapper objectMapper,
+                                           TrustedProxyResolver trustedProxyResolver,
                                            @Value("${app.ratelimit.auth.capacity:10}") int capacity,
                                            @Value("${app.ratelimit.auth.refill-per-minute:10}") int refill) {
-        return new RateLimitFilter(objectMapper, capacity, refill);
+        return new RateLimitFilter(objectMapper, trustedProxyResolver, capacity, refill);
     }
 
     /**
@@ -94,13 +95,43 @@ public class SecurityConfig {
         return reg;
     }
 
+    /**
+     * Browser SSO chain (highest precedence). Scoped to ONLY the OAuth2/SAML login + callback paths,
+     * so the {@code oauth2Login}/{@code saml2Login} entry points (which redirect to the IdP) are
+     * installed here and NOT on the stateless API chain. This keeps credential-less {@code /api/**}
+     * and {@code /actuator/**} calls returning a 401 JSON ProblemDetail rather than a 302 to the
+     * OIDC authorization endpoint. Registered only when an {@link SsoSuccessHandler} is present.
+     */
     @Bean
+    @org.springframework.core.annotation.Order(1)
+    public SecurityFilterChain ssoFilterChain(
+            HttpSecurity http,
+            ObjectProvider<SsoSuccessHandler> ssoSuccessHandlerProvider) throws Exception {
+        SsoSuccessHandler ssoHandler = ssoSuccessHandlerProvider.getIfAvailable();
+        http
+                .securityMatcher(
+                        "/oauth2/authorization/**",
+                        "/login/oauth2/**",
+                        "/saml2/authenticate/**",
+                        "/login/saml2/**",
+                        "/saml2/service-provider-metadata/**")
+                .csrf(csrf -> csrf.disable())
+                .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+                .authorizeHttpRequests(auth -> auth.anyRequest().permitAll());
+        if (ssoHandler != null) {
+            http.oauth2Login(o -> o.successHandler(ssoHandler));
+            http.saml2Login(s -> s.successHandler(ssoHandler));
+        }
+        return http.build();
+    }
+
+    @Bean
+    @org.springframework.core.annotation.Order(2)
     public SecurityFilterChain securityFilterChain(
             HttpSecurity http,
             JwtAuthFilter jwtAuthFilter,
             RateLimitFilter rateLimitFilter,
-            ObjectProvider<ApiKeyAuthFilter> apiKeyAuthFilterProvider,
-            ObjectProvider<SsoSuccessHandler> ssoSuccessHandlerProvider) throws Exception {
+            ObjectProvider<ApiKeyAuthFilter> apiKeyAuthFilterProvider) throws Exception {
         http
                 .csrf(csrf -> csrf.disable())
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
@@ -113,23 +144,30 @@ public class SecurityConfig {
                                 "/.well-known/jwks.json",
                                 "/actuator/health",
                                 "/actuator/health/**",
-                                "/actuator/info",
+                                "/actuator/info"
+                        ).permitAll()
+                        // Sensitive actuator endpoints (metrics, prometheus, env, ...) expose the
+                        // full URI inventory / latencies / JVM internals — restrict to super-admins,
+                        // not "any authenticated principal" (a tenant user or customer API key).
+                        .requestMatchers("/actuator/**").hasAuthority("SUPER_ADMIN")
+                        // The OpenAPI spec + Swagger UI enumerate the entire API surface; require a
+                        // session rather than handing it to anonymous clients.
+                        .requestMatchers(
                                 "/swagger",
                                 "/swagger/**",
                                 "/swagger-ui",
                                 "/swagger-ui/**",
+                                "/swagger-ui.html",
                                 "/v3/api-docs",
-                                "/v3/api-docs/**",
-                                "/login/oauth2/**",
-                                "/login/saml2/**",
-                                "/oauth2/authorization/**",
-                                "/saml2/authenticate/**",
-                                "/saml2/service-provider-metadata/**"
-                        ).permitAll()
-                        // All other actuator endpoints (metrics, prometheus, env, ...) require auth.
-                        .requestMatchers("/actuator/**").authenticated()
+                                "/v3/api-docs/**"
+                        ).authenticated()
                         .requestMatchers("/api/**").authenticated()
                         .anyRequest().authenticated())
+                // Credential-less protected requests get a 401 (JSON) — never a 302 to an IdP. The
+                // SSO redirect entry points live only on the dedicated ssoFilterChain above.
+                .exceptionHandling(ex -> ex
+                        .authenticationEntryPoint(new org.springframework.security.web.authentication
+                                .HttpStatusEntryPoint(org.springframework.http.HttpStatus.UNAUTHORIZED)))
                 .headers(headers -> headers
                         .contentTypeOptions(Customizer.withDefaults())
                         .frameOptions(frame -> frame.deny())
@@ -152,12 +190,6 @@ public class SecurityConfig {
             http.addFilterBefore(apiKeyFilter, JwtAuthFilter.class);
         }
 
-        SsoSuccessHandler ssoHandler = ssoSuccessHandlerProvider.getIfAvailable();
-        if (ssoHandler != null) {
-            http.oauth2Login(o -> o.successHandler(ssoHandler));
-            http.saml2Login(s -> s.successHandler(ssoHandler));
-        }
-
         return http.build();
     }
 
@@ -168,7 +200,8 @@ public class SecurityConfig {
         // allowCredentials(true) is incompatible with a wildcard origin, so never set "*".
         config.setAllowedOrigins(corsAllowedOrigins);
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
-        config.setAllowedHeaders(List.of("Authorization", "Content-Type", "Accept", "X-Requested-With"));
+        config.setAllowedHeaders(List.of(
+                "Authorization", "Content-Type", "Accept", "X-Requested-With", "Idempotency-Key"));
         config.setExposedHeaders(List.of("Authorization", "Content-Disposition"));
         config.setAllowCredentials(true);
         config.setMaxAge(3600L);

@@ -15,7 +15,6 @@ import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
-import java.util.UUID;
 
 /**
  * Heartbeat / lease + seat-counting service backing the licensing phone-home.
@@ -70,7 +69,10 @@ public class ActivationService {
         }
         String node = nodeId.trim();
 
-        LicenseToken token = tokenRepo.findByJti(jti)
+        // Pessimistic row lock on the token (P1-9): serializes the count-seats / insert-activation
+        // sequence for this jti so concurrent first beats from distinct nodes cannot all read
+        // limit-1 and each insert, exceeding the seat cap. The lock is held for the whole tx.
+        LicenseToken token = tokenRepo.findByJtiForUpdate(jti)
                 .orElseThrow(() -> ApiException.notFound("License not found"));
 
         OffsetDateTime now = OffsetDateTime.now();
@@ -82,12 +84,25 @@ public class ActivationService {
             throw ApiException.badRequest("License is expired");
         }
 
+        // P1-5: the CRL is the only enforcement channel for an offline product, so a heartbeat for a
+        // license whose owning subscription is no longer ACTIVE (suspended/cancelled/expired) must be
+        // rejected — otherwise a suspended customer keeps holding seats and renewing leases.
+        Subscription sub = subRepo.findById(token.getSubscriptionId()).orElse(null);
+        if (sub == null) {
+            throw ApiException.notFound("Subscription not found for license");
+        }
+        if (sub.getStatus() != Subscription.Status.ACTIVE) {
+            throw ApiException.conflict(
+                    "Subscription is not active (status " + sub.getStatus() + ")");
+        }
+
         OffsetDateTime leaseFloor = now.minus(leaseWindow);
         Optional<LicenseActivation> existing = activationRepo.findByJtiAndNodeId(jti, node);
 
         if (existing.isEmpty()) {
-            // New node: enforce the seat limit against the currently-active seat count.
-            Integer seatLimit = resolveSeatLimit(token.getSubscriptionId());
+            // New node: enforce the seat limit against the currently-active seat count. The token row
+            // is locked above, so this count/insert pair is serialized against other new-node beats.
+            Integer seatLimit = resolveSeatLimit(sub);
             if (seatLimit != null && seatLimit > 0) {
                 long activeSeats = activationRepo.countByJtiAndLastSeenAtAfter(jti, leaseFloor);
                 if (activeSeats >= seatLimit) {
@@ -126,12 +141,13 @@ public class ActivationService {
             activationRepo.save(activation);
         }
 
-        token.setLastSeenAt(now);
-        token.setLastSeenIp(clientIp);
-        tokenRepo.save(token);
+        // P1-8: refresh last-seen via a guarded conditional UPDATE that only matches an ACTIVE token,
+        // never a full-column entity save. A revocation/expiry committed concurrently leaves status
+        // != ACTIVE so this update matches 0 rows and cannot rewrite status=ACTIVE/revoked_at=NULL.
+        tokenRepo.touchLastSeenIfActive(jti, now, clientIp, LicenseToken.Status.ACTIVE);
 
         long activeSeats = activationRepo.countByJtiAndLastSeenAtAfter(jti, leaseFloor);
-        Integer seatLimit = resolveSeatLimit(token.getSubscriptionId());
+        Integer seatLimit = resolveSeatLimit(sub);
 
         AuditContext.set("license.heartbeat");
         AuditContext.setTarget("license_token", jti);
@@ -170,8 +186,7 @@ public class ActivationService {
      * Seat limit for a subscription: the explicit {@code subscriptions.seats} column when set,
      * otherwise the plan feature {@code seats} if numeric, otherwise {@code null} (unlimited).
      */
-    Integer resolveSeatLimit(UUID subscriptionId) {
-        Subscription sub = subRepo.findById(subscriptionId).orElse(null);
+    Integer resolveSeatLimit(Subscription sub) {
         if (sub == null) return null;
         if (sub.getSeats() != null && sub.getSeats() > 0) {
             return sub.getSeats();

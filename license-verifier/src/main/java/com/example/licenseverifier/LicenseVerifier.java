@@ -63,7 +63,7 @@ public final class LicenseVerifier {
             throw new LicenseFileMalformedException("License content is empty");
         }
         String jwt = extractJwt(licenseFileContent.trim());
-        return verifyJwt(jwt);
+        return verifyJwt(jwt, false);
     }
 
     public License verify(Path path) {
@@ -71,6 +71,37 @@ public final class LicenseVerifier {
         try {
             String content = Files.readString(path, StandardCharsets.UTF_8);
             return verify(content);
+        } catch (IOException e) {
+            throw new LicenseFileMalformedException("Failed to read license file: " + path, e);
+        }
+    }
+
+    /**
+     * Verify a license while <em>tolerating expiry</em>: signature, audience, issuer, nbf and
+     * revocation are all enforced exactly as in {@link #verify(String)}, but an {@code exp} in the
+     * past does not throw. This lets a consumer that supports a read-only grace period (e.g. the
+     * Spring Boot starter's {@code app.license.read-only-on-expiry=true}) load an expired-but-valid
+     * license at startup and transition into READ_ONLY, instead of failing closed and refusing to
+     * boot after a container restart. The returned {@link License} still carries the real (past)
+     * {@code expiresAt}; callers are responsible for deciding what an expired license may do.
+     *
+     * <p>A missing {@code exp} claim is still rejected — only a present-but-past {@code exp} is
+     * tolerated.
+     */
+    public License verifyAllowingExpired(String licenseFileContent) {
+        if (licenseFileContent == null || licenseFileContent.isBlank()) {
+            throw new LicenseFileMalformedException("License content is empty");
+        }
+        String jwt = extractJwt(licenseFileContent.trim());
+        return verifyJwt(jwt, true);
+    }
+
+    /** {@link #verifyAllowingExpired(String)} reading the license content from {@code path}. */
+    public License verifyAllowingExpired(Path path) {
+        Objects.requireNonNull(path, "path");
+        try {
+            String content = Files.readString(path, StandardCharsets.UTF_8);
+            return verifyAllowingExpired(content);
         } catch (IOException e) {
             throw new LicenseFileMalformedException("Failed to read license file: " + path, e);
         }
@@ -93,7 +124,7 @@ public final class LicenseVerifier {
         return content;
     }
 
-    private License verifyJwt(String jwt) {
+    private License verifyJwt(String jwt, boolean allowExpired) {
         SignedJWT signedJwt;
         try {
             signedJwt = SignedJWT.parse(jwt);
@@ -106,9 +137,14 @@ public final class LicenseVerifier {
             throw new LicenseSignatureInvalidException(
                     "Unsupported JWS algorithm: " + header.getAlgorithm() + " (expected EdDSA)");
         }
-        if (header.getType() != null && !EXPECTED_TYP.equalsIgnoreCase(header.getType().getType())) {
+        // Require the typ header to be present AND correct. A missing typ is rejected too: an
+        // attacker who can mint a token of a different type (e.g. a CRL or session token signed by
+        // the same key) must not be able to strip the typ header and have it accepted as a license.
+        if (header.getType() == null || !EXPECTED_TYP.equalsIgnoreCase(header.getType().getType())) {
             throw new LicenseFileMalformedException(
-                    "Unexpected JWT typ: " + header.getType().getType() + " (expected " + EXPECTED_TYP + ")");
+                    "Unexpected JWT typ: "
+                            + (header.getType() == null ? "null" : header.getType().getType())
+                            + " (expected " + EXPECTED_TYP + ")");
         }
         String kid = header.getKeyID();
         if (kid == null || kid.isBlank()) {
@@ -134,7 +170,7 @@ public final class LicenseVerifier {
             throw new LicenseFileMalformedException("Failed to parse JWT claims", e);
         }
 
-        validateTemporalClaims(claims);
+        validateTemporalClaims(claims, allowExpired);
         validateAudience(claims);
         validateIssuer(claims);
         checkRevocation(claims.getJWTID());
@@ -156,15 +192,16 @@ public final class LicenseVerifier {
         return Ed25519Verifiers.resolve(keyProvider, kid);
     }
 
-    private void validateTemporalClaims(JWTClaimsSet claims) {
+    private void validateTemporalClaims(JWTClaimsSet claims, boolean allowExpired) {
         Instant now = Instant.now(clock);
         Date exp = claims.getExpirationTime();
         if (exp == null) {
-            // Mandatory exp: a license without an expiration is rejected outright.
+            // Mandatory exp: a license without an expiration is rejected outright, even when
+            // expiry is tolerated — a license with no exp is malformed, not "expired".
             throw new LicenseExpiredException("License is missing a mandatory exp claim", null);
         }
         Instant expInstant = exp.toInstant();
-        if (now.isAfter(expInstant.plus(clockSkew))) {
+        if (!allowExpired && now.isAfter(expInstant.plus(clockSkew))) {
             throw new LicenseExpiredException(
                     "License expired at " + expInstant, expInstant);
         }

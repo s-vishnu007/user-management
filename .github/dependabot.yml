@@ -1,0 +1,68 @@
+# Dependabot configuration.
+# Keeps dependencies and CI actions patched on a weekly cadence across every ecosystem the
+# repo uses: the Maven reactor, the admin-ui npm project, and the GitHub Actions workflows.
+# See https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+version: 2
+updates:
+  # --- Maven (multi-module reactor; the root pom.xml drives all child modules) ---
+  - package-ecosystem: maven
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - java
+    commit-message:
+      prefix: "deps(maven)"
+    groups:
+      # Batch the Spring Boot / Spring ecosystem together so the managed BOM stays consistent.
+      spring:
+        patterns:
+          - "org.springframework*"
+          - "org.springframework.boot:*"
+    ignore:
+      # Stay on the 3.3.x line for now; the move to a supported 3.4/3.5 line is a tracked,
+      # out-of-band migration (it also moves SAML off the EOL OpenSAML 4 stack).
+      - dependency-name: "org.springframework.boot:spring-boot-starter-parent"
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+
+  # --- npm (admin UI) ---
+  - package-ecosystem: npm
+    directory: "/admin-ui"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - javascript
+    commit-message:
+      prefix: "deps(npm)"
+    groups:
+      # Keep React and its type packages moving together.
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+
+  # --- GitHub Actions (workflow action versions) ---
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "deps(actions)"

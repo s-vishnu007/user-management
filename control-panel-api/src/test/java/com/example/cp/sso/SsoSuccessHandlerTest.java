@@ -55,6 +55,7 @@ class SsoSuccessHandlerTest {
     private TrustedProxyResolver proxyResolver;
     private SessionTokenService tokenService;
     private AuthoritiesLoader authoritiesLoader;
+    private SsoProvisioningService provisioningService;
     private SsoSuccessHandler handler;
 
     @BeforeEach
@@ -72,7 +73,12 @@ class SsoSuccessHandlerTest {
         when(authoritiesLoader.authoritiesFor(any(), any(), eq(false))).thenReturn(Set.of("sub.read"));
         when(memberRepo.findByOrgIdAndUserId(any(), any())).thenReturn(Optional.empty());
 
-        handler = new SsoSuccessHandler(userRepo, memberRepo, providerRepo, identityRepo,
+        // The JIT user/identity/membership writes now live in a @Transactional SsoProvisioningService;
+        // wire a real instance over the same mocks so the handler's gating + the provisioning behaviour
+        // are both exercised end-to-end (the @Transactional boundary is a no-op without a tx manager).
+        provisioningService = new SsoProvisioningService(userRepo, memberRepo, identityRepo, auditWriter);
+
+        handler = new SsoSuccessHandler(providerRepo, identityRepo, provisioningService,
                 auditWriter, proxyResolver, tokenService, authoritiesLoader);
         ReflectionTestUtils.setField(handler, "uiBaseUrl", "https://ui.example.com");
         ReflectionTestUtils.setField(handler, "cookieSecure", true);

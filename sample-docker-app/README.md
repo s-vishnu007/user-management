@@ -11,8 +11,8 @@ A reference Spring Boot service that consumes the `license-verifier-spring-boot-
 | GET | `/api/export/pdf` | `export.pdf` | Returns a stub PDF. 403 if the license does not grant `export.pdf`. |
 | GET | `/api/v2/data` | `api.v2` | Returns sample JSON. 403 without `api.v2`. |
 | POST | `/api/admin/users/invite` | `admin.users.invite` | Body: `{ "email": "..." }`. Returns 202. |
-| GET | `/actuator/health` | none | Spring Boot health probe. |
-| GET | `/actuator/license` | none | License metadata exposed by the starter. |
+| GET | `/actuator/health` | none | Spring Boot health probe (top-level UP/DOWN only when unauthenticated; details `when-authorized`). |
+| GET | `/actuator/license` | HTTP Basic | License metadata exposed by the starter. Requires the actuator credentials (see Configuration). |
 
 ## Running locally
 
@@ -56,8 +56,11 @@ All settings are read from `application.yml` and overridable via environment var
 | `LICENSE_JWKS_URL` | _(empty)_ | Optional URL to refresh the JWKS from at runtime. When empty, the bundled `classpath:/jwks.json` is used. |
 | `LICENSE_REFRESH_INTERVAL` | `PT24H` | ISO-8601 duration. Frequency for re-reading the license + refreshing the JWKS. |
 | `LICENSE_CLOCK_SKEW` | `PT5M` | ISO-8601 duration. Tolerance for `exp` / `nbf` checks. |
-| `LICENSE_READ_ONLY_ON_EXPIRY` | `true` | If `true`, an expired license keeps the app running with `status=READ_ONLY`. |
-| `LICENSE_STRICT` | `false` | If `true`, the app refuses to start without a valid license. |
+| `LICENSE_READ_ONLY_ON_EXPIRY` | `true` | If `true`, an expired license keeps the app running with `status=READ_ONLY` (the verifier loads an expired-but-otherwise-valid license at startup instead of failing closed). |
+| `LICENSE_STRICT` | `false` | If `true`, the app refuses to start without a valid license. Also requires `LICENSE_CRL_URL` to be set, otherwise startup fails because revocation checking would be disabled. |
+| `LICENSE_CRL_URL` | _(empty)_ | URL of the control panel's signed-CRL endpoint. When empty, revocation checking is disabled and a prominent WARN is logged (and startup fails if `LICENSE_STRICT=true`). |
+| `ACTUATOR_USER` | `actuator` | HTTP Basic username for the authenticated actuator endpoints (`/actuator/license`, etc.). |
+| `ACTUATOR_PASSWORD` | `changeit` | HTTP Basic password for the authenticated actuator endpoints. Override in any real deployment. |
 
 ## Replacing the bundled JWKS
 

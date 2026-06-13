@@ -115,7 +115,7 @@ class KeyCompromiseIT extends AbstractIntegrationTest {
                         .contentType(MediaType.APPLICATION_JSON))
                 .andExpect(status().isForbidden());
 
-        long rowCount = signingKeyRepository.count();
+        long signingKeyCount = signingKeyRepository.count();
         MvcResult res = mockMvc.perform(post("/api/v1/admin/keys/rotate-kek")
                         .with(asUser(actor, "key.rotate"))
                         .contentType(MediaType.APPLICATION_JSON))
@@ -123,7 +123,10 @@ class KeyCompromiseIT extends AbstractIntegrationTest {
                 .andReturn();
 
         JsonNode body = objectMapper.readTree(res.getResponse().getContentAsString());
-        assertThat(body.get("reEncrypted").asInt()).isEqualTo((int) rowCount);
+        // KEK rotation now re-encrypts EVERY KeyEncryptor-protected column (signing keys + MFA/webhook/
+        // SSO secrets), not just signing_keys, so the total is at least the signing-key row count (other
+        // categories' rows, if any seeded by sibling tests, only add to it).
+        assertThat(body.get("reEncrypted").asInt()).isGreaterThanOrEqualTo((int) signingKeyCount);
 
         // After KEK rotation the active key still loads/decrypts (round-trips through the new envelope).
         assertThat(keyService.getActiveSigningKeyPair().privateKey()).isNotNull();

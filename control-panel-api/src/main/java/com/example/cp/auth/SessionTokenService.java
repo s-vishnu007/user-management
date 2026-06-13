@@ -30,6 +30,14 @@ public class SessionTokenService {
 
     public static final String ISSUER = "control-panel";
 
+    /**
+     * Marks a token as a full session token. Set on issue and REQUIRED on parse so that another
+     * HS256 token signed with the same secret but a different purpose (e.g. the
+     * {@code mfa_challenge} minted by {@code MfaService}) can never be replayed as a session.
+     */
+    public static final String PURPOSE = "session";
+    private static final String PURPOSE_CLAIM = "purpose";
+
     private final String secret;
     private final Duration ttl;
 
@@ -62,6 +70,7 @@ public class SessionTokenService {
                     .issuer(ISSUER)
                     .subject(userId.toString())
                     .claim("email", email)
+                    .claim(PURPOSE_CLAIM, PURPOSE)
                     .claim("super_admin", superAdmin)
                     .claim("authorities", authoritiesCompact)
                     .claim("tv", tokenVersion)
@@ -91,6 +100,15 @@ public class SessionTokenService {
                 throw ApiException.unauthorized("Invalid token signature");
             }
             JWTClaimsSet claims = jwt.getJWTClaimsSet();
+            // Reject anything that is not a genuine session token signed by us: an mfa_challenge (or
+            // any other purpose) token shares the secret but carries purpose!=session and no issuer,
+            // so it can never be accepted here as a Bearer/cookie session.
+            if (!ISSUER.equals(claims.getIssuer())) {
+                throw ApiException.unauthorized("Invalid token issuer");
+            }
+            if (!PURPOSE.equals(claims.getStringClaim(PURPOSE_CLAIM))) {
+                throw ApiException.unauthorized("Invalid token purpose");
+            }
             Date exp = claims.getExpirationTime();
             if (exp != null && exp.toInstant().isBefore(Instant.now())) {
                 throw ApiException.unauthorized("Token expired");

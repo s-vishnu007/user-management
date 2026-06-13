@@ -95,8 +95,17 @@ public class ApiKeyService {
         for (ApiKey k : candidates) {
             if (k.getRevokedAt() != null) continue;
             if (constantTimeEquals(hash, k.getKeyHash())) {
+                // Touch last_used_at via a targeted, guarded UPDATE (... WHERE id=? AND revoked_at IS
+                // NULL) instead of re-persisting the whole entity. A full-column save would re-write a
+                // stale revoked_at=NULL and silently undo a revoke() that committed between our read
+                // and write (P1-7 lost update). The conditional UPDATE no-ops (0 rows) when the key was
+                // concurrently revoked; in that race we must NOT authenticate the request, so treat a
+                // 0-row result as a miss.
+                int touched = repo.touchLastUsedIfActive(k.getId(), OffsetDateTime.now());
+                if (touched == 0) {
+                    return Optional.empty();
+                }
                 k.setLastUsedAt(OffsetDateTime.now());
-                repo.save(k);
                 return Optional.of(k);
             }
         }
@@ -105,17 +114,21 @@ public class ApiKeyService {
 
     @Transactional
     public void revoke(UUID orgId, UUID id) {
-        ApiKey k = repo.findById(id).orElseThrow(() -> ApiException.notFound("API key not found"));
         // Org-scope the lookup: a key that does not belong to the caller's org is reported as
         // not found (404, not 403) to avoid cross-org existence disclosure. Closes the IDOR where
         // any apikey.write holder could revoke keys in other orgs.
-        if (orgId == null || !orgId.equals(k.getOrgId())) {
+        if (orgId == null) {
             throw ApiException.notFound("API key not found");
         }
-        if (k.getRevokedAt() == null) {
-            k.setRevokedAt(OffsetDateTime.now());
-            repo.save(k);
+        ApiKey k = repo.findById(id).orElseThrow(() -> ApiException.notFound("API key not found"));
+        if (!orgId.equals(k.getOrgId())) {
+            throw ApiException.notFound("API key not found");
         }
+        // Guarded conditional UPDATE (... WHERE id=? AND org_id=? AND revoked_at IS NULL): atomically
+        // stamps revoked_at without loading/re-persisting the row, so a concurrent verify() touch
+        // cannot clobber it. Already-revoked keys no-op (idempotent). The lookup above is still done
+        // first so an unknown/cross-org id deterministically 404s rather than silently succeeding.
+        repo.revokeIfActive(id, orgId, OffsetDateTime.now());
         AuditContext.set("apikey.revoked");
         AuditContext.setTarget("api_key", id.toString());
     }
@@ -123,6 +136,11 @@ public class ApiKeyService {
     @Transactional(readOnly = true)
     public List<ApiKey> listForOrg(UUID orgId) {
         return repo.findByOrgId(orgId);
+    }
+
+    @Transactional(readOnly = true)
+    public org.springframework.data.domain.Page<ApiKey> listForOrg(UUID orgId, org.springframework.data.domain.Pageable pageable) {
+        return repo.findByOrgId(orgId, pageable);
     }
 
     public Set<String> parseScopes(ApiKey key) {

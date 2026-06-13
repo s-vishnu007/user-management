@@ -115,8 +115,10 @@ public class SsoService {
     }
 
     @Transactional
-    public void delete(UUID id) {
-        SsoProvider p = repo.findById(id).orElseThrow(() -> ApiException.notFound("SSO provider not found"));
+    public void delete(UUID id, UUID orgId) {
+        // Tenant-scoped: a missing/other-tenant row is a 404, never a cross-tenant delete.
+        SsoProvider p = repo.findByIdAndOrgId(id, orgId)
+                .orElseThrow(() -> ApiException.notFound("SSO provider not found"));
         repo.delete(p);
 
         // Fail-closed audit (see create() for rationale): record inline + suppress the aspect duplicate.
@@ -139,8 +141,10 @@ public class SsoService {
     }
 
     @Transactional(readOnly = true)
-    public TestResult test(UUID id) {
-        SsoProvider p = repo.findById(id).orElseThrow(() -> ApiException.notFound("SSO provider not found"));
+    public TestResult test(UUID id, UUID orgId) {
+        // Tenant-scoped: a missing/other-tenant row is a 404, never a cross-tenant probe.
+        SsoProvider p = repo.findByIdAndOrgId(id, orgId)
+                .orElseThrow(() -> ApiException.notFound("SSO provider not found"));
         AuditContext.set("sso.provider.tested");
         AuditContext.setTarget("sso_provider", id.toString());
         TestResult result;

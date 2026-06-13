@@ -12,15 +12,25 @@ import java.util.UUID;
 @Repository
 public interface UsageEventRepository extends JpaRepository<UsageEvent, UUID> {
 
+    /**
+     * Hard cap on a single usage-event listing. {@code usage_events} is a high-volume append-only
+     * table, so an unbounded {@code SELECT *} over a busy subscription could pull millions of rows
+     * and OOM the process / response. The query below is bounded by this many most-recent rows;
+     * callers wanting more must narrow the {@code from}/{@code to} window.
+     */
+    int MAX_EVENTS = 1000;
+
     // Native query with explicit casts: in JPQL a bare nullable parameter used as `:from IS NULL`
     // gives Postgres no type to infer ("could not determine data type of parameter"). CAST(... AS
-    // timestamptz) fixes it while keeping the optional-range semantics.
+    // timestamptz) fixes it while keeping the optional-range semantics. The LIMIT bounds the result
+    // to the MAX_EVENTS most-recent rows (the table is high-volume — see MAX_EVENTS).
     @Query(value = """
             SELECT * FROM usage_events
             WHERE subscription_id = :subId
               AND (CAST(:from AS timestamptz) IS NULL OR occurred_at >= :from)
               AND (CAST(:to   AS timestamptz) IS NULL OR occurred_at <  :to)
             ORDER BY occurred_at DESC
+            LIMIT 1000
             """, nativeQuery = true)
     List<UsageEvent> findInRange(@Param("subId") UUID subscriptionId,
                                  @Param("from") OffsetDateTime from,

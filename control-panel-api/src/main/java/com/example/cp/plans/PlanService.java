@@ -5,6 +5,7 @@ import com.example.cp.common.AuditContext;
 import com.example.cp.common.Ids;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -85,10 +86,16 @@ public class PlanService {
 
     @Transactional
     public void replacePermissions(UUID planId, Collection<String> permissionCodes) {
+        // Defense in depth behind the controller's @NotNull: a null list must never be silently
+        // treated as "delete everything" (the P0-2 data-loss bug). An empty list is a legitimate
+        // "clear all permissions" request and is allowed through.
+        if (permissionCodes == null) {
+            throw ApiException.badRequest("permissionCodes is required (send an empty array to clear all permissions)");
+        }
         planRepo.findById(planId).orElseThrow(() -> ApiException.notFound("Plan not found"));
         permRepo.deleteByIdPlanId(planId);
         permRepo.flush();
-        Set<String> uniq = new TreeSet<>(permissionCodes == null ? List.of() : permissionCodes);
+        Set<String> uniq = new TreeSet<>(permissionCodes);
         List<PlanPermission> rows = new ArrayList<>(uniq.size());
         for (String code : uniq) {
             if (code == null || code.isBlank()) continue;
@@ -128,6 +135,13 @@ public class PlanService {
     @Transactional(readOnly = true)
     public List<Plan> listPlans(boolean onlyActive) {
         return onlyActive ? planRepo.findAllByActiveTrue() : planRepo.findAll();
+    }
+
+    @Transactional(readOnly = true)
+    public List<Plan> listPlans(boolean onlyActive, Pageable pageable) {
+        return (onlyActive
+                ? planRepo.findAllByActiveTrue(pageable)
+                : planRepo.findAll(pageable)).getContent();
     }
 
     @Transactional(readOnly = true)
@@ -175,7 +189,15 @@ public class PlanService {
 
     @Transactional(readOnly = true)
     public List<PlanDto> listWithDetails(boolean onlyActive) {
-        List<Plan> plans = listPlans(onlyActive);
+        return toDtos(listPlans(onlyActive));
+    }
+
+    @Transactional(readOnly = true)
+    public List<PlanDto> listWithDetails(boolean onlyActive, Pageable pageable) {
+        return toDtos(listPlans(onlyActive, pageable));
+    }
+
+    private List<PlanDto> toDtos(List<Plan> plans) {
         List<PlanDto> out = new ArrayList<>(plans.size());
         for (Plan p : plans) {
             out.add(new PlanDto(

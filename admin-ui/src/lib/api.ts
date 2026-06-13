@@ -1,9 +1,13 @@
 import axios, { AxiosError, type AxiosInstance } from 'axios';
 import type {
   ApiKey,
+  ApiKeyDto,
   AuditEntry,
+  AuthIdentity,
+  IssuedLicense,
   License,
   LoginResponse,
+  MeResponse,
   OrgMember,
   Organization,
   Paged,
@@ -11,7 +15,10 @@ import type {
   Plan,
   RoleDef,
   SigningKey,
-  SsoConfig,
+  SsoProviderConfig,
+  SsoProviderDto,
+  SsoProviderView,
+  SsoType,
   Subscription,
   SubscriptionOverride,
   UsageReport,
@@ -21,28 +28,13 @@ import type {
 export const API_BASE: string =
   (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8080';
 
-const TOKEN_STORAGE_KEY = 'cp.accessToken';
-
-export function getStoredToken(): string | null {
-  return localStorage.getItem(TOKEN_STORAGE_KEY);
-}
-export function setStoredToken(token: string | null) {
-  if (token) localStorage.setItem(TOKEN_STORAGE_KEY, token);
-  else localStorage.removeItem(TOKEN_STORAGE_KEY);
-}
-
+// The session lives in the HttpOnly `cp_session` cookie set by the backend on login/SSO. We do
+// NOT persist the JWT in localStorage (it is reachable by XSS, defeating the HttpOnly cookie —
+// finding P2 #32). `withCredentials` makes the browser send the cookie on every request, so the
+// SPA authenticates purely via the cookie and never needs to read or attach a Bearer token.
 export const http: AxiosInstance = axios.create({
   baseURL: API_BASE,
   withCredentials: true,
-});
-
-http.interceptors.request.use((cfg) => {
-  const t = getStoredToken();
-  if (t) {
-    cfg.headers = cfg.headers ?? {};
-    (cfg.headers as Record<string, string>).Authorization = `Bearer ${t}`;
-  }
-  return cfg;
 });
 
 let onUnauthorized: (() => void) | null = null;
@@ -54,7 +46,6 @@ http.interceptors.response.use(
   (r) => r,
   (err: AxiosError) => {
     if (err.response?.status === 401) {
-      setStoredToken(null);
       onUnauthorized?.();
     }
     return Promise.reject(err);
@@ -70,18 +61,36 @@ export function apiErrorMessage(err: unknown): string {
   return 'Unknown error';
 }
 
+/** Generates an RFC4122-ish idempotency key for create mutations. */
+export function newIdempotencyKey(): string {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === 'function') return c.randomUUID();
+  // Fallback for non-secure contexts / older runtimes.
+  return 'idm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
+}
+
+function idempotent(key?: string) {
+  return { headers: { 'Idempotency-Key': key ?? newIdempotencyKey() } };
+}
+
 // ---------- Auth ----------
 export const auth = {
   login: async (email: string, password: string): Promise<LoginResponse> => {
     const { data } = await http.post<LoginResponse>('/api/v1/auth/login', { email, password });
     return data;
   },
+  /** Step 2 of MFA login: exchange the signed challenge + TOTP code for a session. */
+  mfaLogin: async (challenge: string, code: string): Promise<LoginResponse> => {
+    const { data } = await http.post<LoginResponse>('/api/v1/auth/mfa/login', { challenge, code });
+    return data;
+  },
   logout: async (): Promise<void> => {
     await http.post('/api/v1/auth/logout');
   },
-  me: async (): Promise<User> => {
-    const { data } = await http.get<User>('/api/v1/auth/me');
-    return data;
+  /** Cookie-authenticated identity bootstrap; returns the unified {user, permissions, orgs}. */
+  me: async (): Promise<AuthIdentity> => {
+    const { data } = await http.get<MeResponse>('/api/v1/auth/me');
+    return { user: data.user, permissions: data.permissions ?? [], orgs: data.orgs ?? [] };
   },
   requestPasswordReset: async (email: string) => {
     await http.post('/api/v1/auth/password-reset/request', { email });
@@ -97,8 +106,11 @@ export const orgs = {
     const { data } = await http.get<Organization[] | Paged<Organization>>('/api/v1/orgs');
     return Array.isArray(data) ? data : data.items;
   },
-  create: async (payload: { slug: string; name: string }): Promise<Organization> => {
-    const { data } = await http.post<Organization>('/api/v1/orgs', payload);
+  create: async (
+    payload: { slug: string; name: string },
+    idempotencyKey?: string,
+  ): Promise<Organization> => {
+    const { data } = await http.post<Organization>('/api/v1/orgs', payload, idempotent(idempotencyKey));
     return data;
   },
   get: async (id: string): Promise<Organization> => {
@@ -133,12 +145,13 @@ export const users = {
 // ---------- RBAC ----------
 export const rbac = {
   roles: async (): Promise<RoleDef[]> => {
-    const { data } = await http.get<RoleDef[]>('/api/v1/rbac/roles');
-    return data;
+    const { data } = await http.get<RoleDef[] | Paged<RoleDef>>('/api/v1/rbac/roles');
+    return Array.isArray(data) ? data : data.items;
   },
   permissions: async (): Promise<Permission[]> => {
-    const { data } = await http.get<Permission[]>('/api/v1/rbac/permissions');
-    return data;
+    // The endpoint returns a PagedResponse<PermissionDto>; unwrap `.items`.
+    const { data } = await http.get<Permission[] | Paged<Permission>>('/api/v1/rbac/permissions');
+    return Array.isArray(data) ? data : data.items;
   },
   assignRole: async (userId: string, payload: { roleCode: string; orgId?: string }) => {
     await http.post(`/api/v1/rbac/users/${userId}/roles`, payload);
@@ -146,6 +159,9 @@ export const rbac = {
 };
 
 // ---------- Plans ----------
+// The backend create endpoint takes `permissions` (string[]) and `features` (a JSON object
+// keyed by feature key) inline; the permissions/features endpoints take `permissionCodes` and
+// `features` respectively. `features` is a Map<String,Object>, NOT an array.
 export const plans = {
   list: async (): Promise<Plan[]> => {
     const { data } = await http.get<Plan[] | Paged<Plan>>('/api/v1/plans');
@@ -155,19 +171,45 @@ export const plans = {
     const { data } = await http.get<Plan>(`/api/v1/plans/${id}`);
     return data;
   },
-  create: async (payload: Partial<Plan>): Promise<Plan> => {
-    const { data } = await http.post<Plan>('/api/v1/plans', payload);
+  create: async (
+    payload: {
+      code: string;
+      name: string;
+      description?: string;
+      tier?: string;
+      defaultTtlDays?: number;
+      active?: boolean;
+      permissions?: string[];
+      features?: Record<string, unknown>;
+    },
+    idempotencyKey?: string,
+  ): Promise<Plan> => {
+    const { data } = await http.post<Plan>('/api/v1/plans', payload, idempotent(idempotencyKey));
     return data;
   },
-  update: async (id: string, patch: Partial<Plan>): Promise<Plan> => {
+  update: async (
+    id: string,
+    patch: {
+      name?: string;
+      description?: string;
+      tier?: string;
+      defaultTtlDays?: number;
+      active?: boolean;
+    },
+  ): Promise<Plan> => {
     const { data } = await http.patch<Plan>(`/api/v1/plans/${id}`, patch);
     return data;
   },
-  setPermissions: async (id: string, permissions: string[]) => {
-    await http.post(`/api/v1/plans/${id}/permissions`, { permissions });
+  // Backend DTO field is `permissionCodes` — sending `permissions` binds null and DELETES every
+  // entitlement permission on the plan (finding P0-2).
+  setPermissions: async (id: string, permissionCodes: string[]): Promise<Plan> => {
+    const { data } = await http.post<Plan>(`/api/v1/plans/${id}/permissions`, { permissionCodes });
+    return data;
   },
-  setFeatures: async (id: string, features: { key: string; value: unknown }[]) => {
-    await http.post(`/api/v1/plans/${id}/features`, { features });
+  // Backend DTO field is `features`, typed as a JSON object (Map<String,Object>).
+  setFeatures: async (id: string, features: Record<string, unknown>): Promise<Plan> => {
+    const { data } = await http.post<Plan>(`/api/v1/plans/${id}/features`, { features });
+    return data;
   },
 };
 
@@ -186,12 +228,15 @@ export const subscriptions = {
       startsAt: string;
       endsAt: string;
       seats: number;
+      notes?: string;
       overrides?: SubscriptionOverride[];
     },
+    idempotencyKey?: string,
   ): Promise<Subscription> => {
     const { data } = await http.post<Subscription>(
       `/api/v1/orgs/${orgId}/subscriptions`,
       payload,
+      idempotent(idempotencyKey),
     );
     return data;
   },
@@ -205,31 +250,44 @@ export const subscriptions = {
   cancel: async (id: string, reason?: string) => {
     await http.post(`/api/v1/subscriptions/${id}/cancel`, { reason });
   },
-  setOverrides: async (id: string, overrides: SubscriptionOverride[]) => {
-    await http.post(`/api/v1/subscriptions/${id}/overrides`, { overrides });
+  reactivate: async (id: string) => {
+    await http.post(`/api/v1/subscriptions/${id}/reactivate`);
+  },
+  // The backend endpoint adds ONE override per call: POST /subscriptions/{id}/overrides with a
+  // single {type, key, value} body (not an array).
+  addOverride: async (id: string, override: SubscriptionOverride) => {
+    await http.post(`/api/v1/subscriptions/${id}/overrides`, override);
+  },
+  removeOverride: async (id: string, overrideId: string) => {
+    await http.delete(`/api/v1/subscriptions/${id}/overrides/${overrideId}`);
   },
 };
 
 // ---------- Licenses ----------
 export const licenses = {
-  issue: async (subId: string, payload?: { ttlDays?: number; notes?: string }): Promise<License> => {
-    const { data } = await http.post<License>(`/api/v1/subscriptions/${subId}/licenses`, payload ?? {});
+  issue: async (
+    subId: string,
+    payload?: { ttlDays?: number; audience?: string[]; notes?: string; trial?: boolean },
+    idempotencyKey?: string,
+  ): Promise<IssuedLicense> => {
+    const { data } = await http.post<IssuedLicense>(
+      `/api/v1/subscriptions/${subId}/licenses`,
+      payload ?? {},
+      idempotent(idempotencyKey),
+    );
     return data;
   },
-  listForSubscription: async (subId: string): Promise<License[]> => {
-    const { data } = await http.get<License[] | Paged<License>>(
-      `/api/v1/licenses?subscriptionId=${encodeURIComponent(subId)}`,
-    );
-    return Array.isArray(data) ? data : data.items;
-  },
-  list: async (params: Record<string, string | number | undefined> = {}): Promise<License[]> => {
-    const q = new URLSearchParams();
-    Object.entries(params).forEach(([k, v]) => {
-      if (v !== undefined && v !== '') q.set(k, String(v));
-    });
+  // The /licenses endpoint REQUIRES subscriptionId (the tenant-leak fix). There is no unscoped
+  // global enumeration; callers must pass a subscriptionId (see licenses.list / LicensesPage).
+  listForSubscription: async (subId: string, status?: string): Promise<License[]> => {
+    const q = new URLSearchParams({ subscriptionId: subId });
+    if (status) q.set('status', status);
     const { data } = await http.get<License[] | Paged<License>>(`/api/v1/licenses?${q.toString()}`);
     return Array.isArray(data) ? data : data.items;
   },
+  /** Alias retained for clarity; subscriptionId is mandatory. */
+  list: async (params: { subscriptionId: string; status?: string }): Promise<License[]> =>
+    licenses.listForSubscription(params.subscriptionId, params.status),
   revoke: async (jti: string, reason?: string) => {
     await http.post(`/api/v1/licenses/${jti}/revoke`, { reason });
   },
@@ -248,11 +306,15 @@ export const licenses = {
 // ---------- Signing keys ----------
 export const keys = {
   list: async (): Promise<SigningKey[]> => {
-    const { data } = await http.get<SigningKey[]>('/api/v1/admin/keys');
-    return data;
+    const { data } = await http.get<SigningKey[] | Paged<SigningKey>>('/api/v1/admin/keys');
+    return Array.isArray(data) ? data : data.items;
   },
-  rotate: async (): Promise<SigningKey> => {
-    const { data } = await http.post<SigningKey>('/api/v1/admin/keys/rotate');
+  rotate: async (idempotencyKey?: string): Promise<SigningKey> => {
+    const { data } = await http.post<SigningKey>(
+      '/api/v1/admin/keys/rotate',
+      {},
+      idempotent(idempotencyKey),
+    );
     return data;
   },
 };
@@ -312,34 +374,102 @@ export const audit = {
 };
 
 // ---------- SSO ----------
+/** Parses an SsoProviderDto's JSON `config` string into a typed view; tolerant of bad JSON. */
+export function decodeSsoProvider(dto: SsoProviderDto): SsoProviderView {
+  let config: SsoProviderConfig = {};
+  try {
+    const parsed = dto.config ? JSON.parse(dto.config) : {};
+    if (parsed && typeof parsed === 'object') config = parsed as SsoProviderConfig;
+  } catch {
+    config = {};
+  }
+  return { id: dto.id, type: dto.type, enabled: dto.enabled, config };
+}
+
 export const sso = {
-  get: async (orgId: string): Promise<SsoConfig | null> => {
-    try {
-      const { data } = await http.get<SsoConfig>(`/api/v1/orgs/${orgId}/sso`);
-      return data;
-    } catch (e) {
-      if (axios.isAxiosError(e) && e.response?.status === 404) return null;
-      throw e;
-    }
+  // The API returns a LIST of {id, type, config(JSON string), enabled} — one per protocol —
+  // NOT a single flat object.
+  list: async (orgId: string): Promise<SsoProviderView[]> => {
+    const { data } = await http.get<SsoProviderDto[] | Paged<SsoProviderDto>>(
+      `/api/v1/orgs/${orgId}/sso`,
+    );
+    const arr = Array.isArray(data) ? data : data.items;
+    return arr.map(decodeSsoProvider);
   },
-  save: async (orgId: string, payload: SsoConfig): Promise<SsoConfig> => {
-    const { data } = await http.post<SsoConfig>(`/api/v1/orgs/${orgId}/sso`, payload);
-    return data;
+  // Create accepts {type, config} where config is a JSON object (Map<String,Object>).
+  create: async (
+    orgId: string,
+    payload: { type: SsoType; config: SsoProviderConfig },
+  ): Promise<SsoProviderView> => {
+    const { data } = await http.post<SsoProviderDto>(`/api/v1/orgs/${orgId}/sso`, payload);
+    return decodeSsoProvider(data);
+  },
+  remove: async (orgId: string, id: string) => {
+    await http.delete(`/api/v1/orgs/${orgId}/sso/${id}`);
+  },
+  test: async (orgId: string, id: string) => {
+    const { data } = await http.post(`/api/v1/orgs/${orgId}/sso/${id}/test`);
+    return data as { ok?: boolean; message?: string } & Record<string, unknown>;
   },
 };
 
 // ---------- API keys ----------
+function parseScopes(raw: string | string[] | undefined): string[] {
+  if (Array.isArray(raw)) return raw;
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    // Tolerate a plain comma-separated fallback.
+    return raw.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+}
+
+/** Normalizes a backend ApiKeyDto (scopes is a JSON string) into the UI ApiKey shape. */
+export function normalizeApiKey(dto: ApiKeyDto): ApiKey {
+  return {
+    id: dto.id,
+    orgId: dto.orgId,
+    name: dto.name,
+    prefix: dto.keyPrefix,
+    scopes: parseScopes(dto.scopes),
+    createdAt: dto.createdAt,
+    lastUsedAt: dto.lastUsedAt,
+    revokedAt: dto.revokedAt,
+  };
+}
+
 export const apiKeys = {
   list: async (orgId: string): Promise<ApiKey[]> => {
-    const { data } = await http.get<ApiKey[] | Paged<ApiKey>>(`/api/v1/orgs/${orgId}/api-keys`);
-    return Array.isArray(data) ? data : data.items;
+    const { data } = await http.get<ApiKeyDto[] | Paged<ApiKeyDto>>(
+      `/api/v1/orgs/${orgId}/api-keys`,
+    );
+    const arr = Array.isArray(data) ? data : data.items;
+    return arr.map(normalizeApiKey);
   },
   create: async (
     orgId: string,
-    payload: { name: string; scopes: string[]; expiresAt?: string },
+    payload: { name: string; scopes: string[] },
+    idempotencyKey?: string,
   ): Promise<ApiKey> => {
-    const { data } = await http.post<ApiKey>(`/api/v1/orgs/${orgId}/api-keys`, payload);
-    return data;
+    // The create response is a CreateResponse: {id, name, key (plaintext), keyPrefix, scopes}.
+    const { data } = await http.post<{
+      id: string;
+      name: string;
+      key: string;
+      keyPrefix: string;
+      scopes: string[] | null;
+      createdAt: string;
+    }>(`/api/v1/orgs/${orgId}/api-keys`, payload, idempotent(idempotencyKey));
+    return {
+      id: data.id,
+      name: data.name,
+      prefix: data.keyPrefix,
+      scopes: data.scopes ?? payload.scopes,
+      createdAt: data.createdAt,
+      plaintext: data.key,
+    };
   },
   remove: async (orgId: string, id: string) => {
     await http.delete(`/api/v1/orgs/${orgId}/api-keys/${id}`);

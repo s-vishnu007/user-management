@@ -17,31 +17,64 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 import java.time.Duration;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
 
 /**
- * Per-client-IP token-bucket rate limiter for the sensitive auth endpoints (login + password-reset).
- * Wired into the Spring Security chain (before {@code JwtAuthFilter}) by {@code SecurityConfig}.
+ * Per-client-IP token-bucket rate limiter for the sensitive auth endpoints (login, the two-step MFA
+ * login, and password-reset). Wired into the Spring Security chain (before {@code JwtAuthFilter}) by
+ * {@code SecurityConfig}.
  *
- * <p>Uses the bucket4j core API ({@link io.github.bucket4j.Bucket}) with an in-memory
- * {@link ConcurrentHashMap} of per-IP buckets. Returns a {@code 429} ProblemDetail
- * ({@code application/problem+json}) with a {@code Retry-After} header when a bucket is empty.</p>
+ * <p>Uses the bucket4j core API ({@link io.github.bucket4j.Bucket}) with an in-memory, <b>bounded</b>
+ * access-ordered LRU map of per-IP buckets ({@link #MAX_BUCKETS} entries, evicting the
+ * least-recently-used). Returns a {@code 429} ProblemDetail ({@code application/problem+json}) with a
+ * {@code Retry-After} header when a bucket is empty.</p>
+ *
+ * <p>The client IP is resolved via {@link TrustedProxyResolver#resolveClientIp(HttpServletRequest)},
+ * so behind the documented TLS-terminating proxy each end-user gets their own bucket rather than the
+ * whole user base collapsing into the single proxy-IP bucket (which would let 10 unauthenticated
+ * POSTs/min lock out login for everyone).</p>
  *
  * <p><b>Multi-instance note (follow-up #27):</b> this limiter is per-instance/in-memory. A
- * Redis-backed bucket4j proxy-manager is the horizontal-scaling follow-up; an in-memory limiter is
- * acceptable for the P0 hardening pass.</p>
+ * Redis-backed bucket4j proxy-manager is the horizontal-scaling follow-up; the cluster-wide
+ * brute-force lockout is already handled by {@code LoginRateLimiter} (Redis-backed in prod).</p>
  */
 public class RateLimitFilter extends OncePerRequestFilter {
 
+    /** Upper bound on tracked per-IP buckets; protects against unbounded memory growth / IP-spray. */
+    static final int MAX_BUCKETS = 50_000;
+
+    private static final Set<String> PROTECTED_PATHS = Set.of(
+            "/api/v1/auth/login",
+            "/api/v1/auth/mfa/login",
+            "/api/v1/auth/password-reset/request",
+            "/api/v1/auth/password-reset/confirm");
+
     private final ObjectMapper objectMapper;
-    private final ConcurrentHashMap<String, Bucket> buckets = new ConcurrentHashMap<>();
+    private final TrustedProxyResolver proxyResolver;
     private final int capacity;
     private final int refillPerMinute;
 
-    public RateLimitFilter(ObjectMapper objectMapper, int capacity, int refillPerMinute) {
+    /**
+     * Access-ordered LRU bounded to {@link #MAX_BUCKETS}. Guarded by its own monitor; lookups are
+     * brief (map get/put), so contention on the auth endpoints is negligible compared to the
+     * downstream bcrypt/Redis work.
+     */
+    private final Map<String, Bucket> buckets;
+
+    public RateLimitFilter(ObjectMapper objectMapper, TrustedProxyResolver proxyResolver,
+                           int capacity, int refillPerMinute) {
         this.objectMapper = objectMapper;
+        this.proxyResolver = proxyResolver;
         this.capacity = capacity;
         this.refillPerMinute = refillPerMinute;
+        this.buckets = new LinkedHashMap<>(256, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, Bucket> eldest) {
+                return size() > MAX_BUCKETS;
+            }
+        };
     }
 
     /**
@@ -57,21 +90,23 @@ public class RateLimitFilter extends OncePerRequestFilter {
         if (path == null || path.isEmpty()) {
             path = req.getRequestURI();
         }
-        boolean protectedPath = path != null && (
-                path.equals("/api/v1/auth/login")
-                        || path.equals("/api/v1/auth/password-reset/request")
-                        || path.equals("/api/v1/auth/password-reset/confirm"));
-        return !protectedPath;
+        return path == null || !PROTECTED_PATHS.contains(path);
     }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
-        // Key off the direct socket peer. Do NOT trust X-Forwarded-For here unless a fronting proxy
-        // is known-good; the fronting nginx sets X-Real-IP for that purpose (see admin-ui/nginx.conf).
-        String key = request.getRemoteAddr();
-        Bucket bucket = buckets.computeIfAbsent(key, k -> newBucket());
+        // Resolve the real client IP (honors X-Forwarded-For only from a configured trusted proxy),
+        // so each end-user gets their own bucket rather than sharing the fronting-proxy IP.
+        String key = proxyResolver.resolveClientIp(request);
+        if (key == null || key.isBlank()) {
+            key = request.getRemoteAddr();
+        }
+        Bucket bucket;
+        synchronized (buckets) {
+            bucket = buckets.computeIfAbsent(key, k -> newBucket());
+        }
         if (bucket.tryConsume(1)) {
             chain.doFilter(request, response);
             return;

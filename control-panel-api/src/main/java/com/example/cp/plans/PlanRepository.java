@@ -1,5 +1,7 @@
 package com.example.cp.plans;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
@@ -15,4 +17,6 @@ public interface PlanRepository extends JpaRepository<Plan, UUID> {
     boolean existsByCode(String code);
 
     List<Plan> findAllByActiveTrue();
+
+    Page<Plan> findAllByActiveTrue(Pageable pageable);
 }

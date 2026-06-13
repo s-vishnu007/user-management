@@ -28,6 +28,4 @@ public interface SessionRevocationStore {
 
     /** @return cached token version, or {@code -1} on cache miss / error so callers fall back to the DB. */
     long currentTokenVersion(UUID userId);
-
-    long bumpTokenVersion(UUID userId);
 }

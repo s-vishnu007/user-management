@@ -1,5 +1,6 @@
 package com.example.cp.compliance;
 
+import com.example.cp.audit.AuditLogRepository;
 import com.example.cp.auth.SessionRevocationStore;
 import com.example.cp.common.ApiException;
 import com.example.cp.common.Ids;
@@ -40,6 +41,7 @@ public class ErasureService {
     private final OrgMemberRepository orgMemberRepository;
     private final UserMfaRepository userMfaRepository;
     private final ErasureLogRepository erasureLogRepository;
+    private final AuditLogRepository auditLogRepository;
     private final SessionRevocationStore revocationStore;
     private final JdbcTemplate jdbc;
 
@@ -47,12 +49,14 @@ public class ErasureService {
                           OrgMemberRepository orgMemberRepository,
                           UserMfaRepository userMfaRepository,
                           ErasureLogRepository erasureLogRepository,
+                          AuditLogRepository auditLogRepository,
                           SessionRevocationStore revocationStore,
                           JdbcTemplate jdbc) {
         this.userRepository = userRepository;
         this.orgMemberRepository = orgMemberRepository;
         this.userMfaRepository = userMfaRepository;
         this.erasureLogRepository = erasureLogRepository;
+        this.auditLogRepository = auditLogRepository;
         this.revocationStore = revocationStore;
         this.jdbc = jdbc;
     }
@@ -91,11 +95,13 @@ public class ErasureService {
         int ssoDeleted = jdbc.update("DELETE FROM sso_identities WHERE user_id = ?", userId);
         userMfaRepository.deleteByUserId(userId);
 
-        // 4. Audit rows are RETAINED and left UNMODIFIED: audit_log is immutable (append-only,
-        //    tamper-evident — a DB trigger blocks UPDATE/DELETE). The actor_user_id UUID they
-        //    reference is pseudonymised by the redaction of the users row above, and the audit writer
-        //    already masks emails, so there is no raw PII to scrub (and scrubbing would violate the
-        //    immutability guarantee the audit subsystem deliberately enforces).
+        // 4. Audit rows are RETAINED (the security trail is append-only and tamper-evident — a DB
+        //    trigger rejects DELETE and any non-redaction UPDATE), but the PII embedded in those rows
+        //    for THIS subject is scrubbed: the raw client IP is always stored, and some writers (e.g.
+        //    the SCIM provisioned-event payload) put the raw email into payload_json — so the prior
+        //    "the audit writer already masks emails" justification did not hold. We redact payload_json
+        //    + ip_address for every row the erased subject authored, within this transaction.
+        int auditRedacted = redactSubjectAudit(userId);
 
         // 5. Ledger row (PII-free).
         ErasureLog ledger = ErasureLog.builder()
@@ -109,8 +115,8 @@ public class ErasureService {
                 .build();
         erasureLogRepository.save(ledger);
 
-        log.info("Erased user {} (ssoIdentitiesDeleted={}); audit_log retained unmodified (immutable)",
-                userId, ssoDeleted);
+        log.info("Erased user {} (ssoIdentitiesDeleted={}, auditRowsRedacted={}); audit_log identity "
+                + "columns retained, PII scrubbed", userId, ssoDeleted, auditRedacted);
         return ledger;
     }
 
@@ -186,8 +192,24 @@ public class ErasureService {
             }
             jdbc.update("DELETE FROM sso_identities WHERE user_id = ?", userId);
             userMfaRepository.deleteByUserId(userId);
-            // audit_log intentionally NOT modified (immutable; see eraseUser step 4).
+            // Scrub PII from this member's retained audit rows (see eraseUser step 4).
+            redactSubjectAudit(userId);
         });
+    }
+
+    /**
+     * Scrub PII (payload_json + ip_address) from every audit_log row authored by {@code userId}, within
+     * the current transaction. The audit_log immutability trigger blocks UPDATE unless the transaction
+     * opts in via the session GUC {@code app.audit_redaction='on'}; we set it LOCAL (rolled back with
+     * the tx) just before the redaction UPDATE so this is the only sanctioned mutation path. The GUC and
+     * the redaction UPDATE share the transaction-bound JDBC connection.
+     *
+     * @return number of audit rows redacted.
+     */
+    private int redactSubjectAudit(UUID userId) {
+        // Opt this transaction into the narrow audit-redaction exception to the immutability trigger.
+        jdbc.execute("SET LOCAL app.audit_redaction = 'on'");
+        return auditLogRepository.redactPiiForActor(userId);
     }
 
     /** Stable, non-reversible placeholder email for an erased user (keeps the unique constraint). */

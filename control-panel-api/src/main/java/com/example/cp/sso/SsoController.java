@@ -43,14 +43,17 @@ public class SsoController {
     @DeleteMapping("/{id}")
     @PreAuthorize("hasAuthority('sso.write') or @orgAccess.isOwnerOrAdmin(#orgId)")
     public ResponseEntity<Void> delete(@PathVariable UUID orgId, @PathVariable UUID id) {
-        service.delete(id);
+        // Scope by (id, orgId): proving the caller manages the PATH org is not enough — the resource
+        // must also belong to that org, or an admin of org A could delete org B's provider by id (IDOR).
+        service.delete(id, orgId);
         return ResponseEntity.noContent().build();
     }
 
     @PostMapping("/{id}/test")
     @PreAuthorize("hasAuthority('sso.write') or @orgAccess.isOwnerOrAdmin(#orgId)")
     public SsoService.TestResult test(@PathVariable UUID orgId, @PathVariable UUID id) {
-        return service.test(id);
+        // Scope by (id, orgId) for the same cross-tenant reason as delete().
+        return service.test(id, orgId);
     }
 
     public record CreateRequest(@NotNull SsoProvider.Type type, @NotNull Map<String, Object> config) {}

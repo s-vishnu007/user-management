@@ -63,7 +63,7 @@ public class BillingController {
     @PreAuthorize("@tenantAccess.canManageOrg(#orgId)")
     public ResponseEntity<InvoiceDto> generate(@PathVariable UUID orgId,
                                                @RequestBody GenerateRequest body) {
-        Invoice inv = billingService.generateDraftInvoice(orgId, body.subscriptionId());
+        Invoice inv = billingService.generateDraftInvoice(orgId, body.subscriptionId(), body.period());
         return ResponseEntity.status(201)
                 .body(InvoiceDto.from(inv, billingService.lineItems(inv.getId())));
     }
@@ -86,7 +86,14 @@ public class BillingController {
     // DTOs
     // ------------------------------------------------------------------
 
-    public record GenerateRequest(@NotNull UUID subscriptionId) {}
+    /**
+     * Request to rate a subscription into a DRAFT invoice. {@code period} is any instant within the
+     * target billing period (the UTC month); the service normalizes it to the month boundary that
+     * {@code usage_quotas} are bucketed under. {@code period} is optional — when absent the current month
+     * is billed. Only that single period's usage is rated, and a second generate for the same
+     * {@code (subscription, period)} returns the existing invoice rather than re-billing.
+     */
+    public record GenerateRequest(@NotNull UUID subscriptionId, OffsetDateTime period) {}
 
     public record BillingAccountDto(UUID id, UUID orgId, String provider, String externalCustomerId,
                                     String currency, OffsetDateTime createdAt) {

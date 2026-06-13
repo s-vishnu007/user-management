@@ -1,6 +1,5 @@
 package com.example.cp.webhooks;
 
-import com.example.cp.events.OutboxEventRepository;
 import com.example.cp.keys.KeyEncryptor;
 import com.example.cp.licenses.LicenseTokenRepository;
 import com.example.cp.subscriptions.SubscriptionRepository;
@@ -61,7 +60,6 @@ import static org.mockito.Mockito.when;
 @MockitoSettings(strictness = Strictness.LENIENT)
 class WebhookDispatchSchedulerTest {
 
-    @Mock private OutboxEventRepository outboxRepo;
     @Mock private WebhookSubscriptionRepository subRepo;
     @Mock private WebhookDeliveryRepository deliveryRepo;
     @Mock private SubscriptionRepository subscriptionRepo;
@@ -71,11 +69,16 @@ class WebhookDispatchSchedulerTest {
     @Mock private HttpClient httpClient;
 
     private final WebhookSigner signer = new WebhookSigner();
+    // Real guard (no Spring): allows public/test-net addresses, rejects loopback/private. The delivery
+    // tests target documented TEST-NET-3 (203.0.113.x) so the SSRF re-check passes hermetically.
+    private final WebhookUrlGuard urlGuard = new WebhookUrlGuard(false, "");
 
     private WebhookDispatchScheduler scheduler() {
         WebhookDispatchScheduler s = new WebhookDispatchScheduler(
-                outboxRepo, subRepo, deliveryRepo, subscriptionRepo, tokenRepo, signer, keyEncryptor,
-                jdbc, Duration.ofMinutes(10));
+                subRepo, deliveryRepo, subscriptionRepo, tokenRepo, signer, keyEncryptor,
+                jdbc, urlGuard, null, 8, Duration.ofSeconds(10));
+        // self is only used by the @Scheduled dispatch() entry point (proxy routing); the unit tests
+        // invoke the package-private phase methods directly, so a null self is never dereferenced.
         s.setHttpClientForTest(httpClient);
         return s;
     }
@@ -120,6 +123,118 @@ class WebhookDispatchSchedulerTest {
         assertThat(q).contains("ORDER BY d.created_at ASC");
         assertThat(q).contains("FOR UPDATE OF d SKIP LOCKED");
         verify(jdbc, never()).update(anyString(), any(), any());
+    }
+
+    // ------------------------------------------------------------------
+    //  Fan-out: durable claim (no time-window drop) + fanned_out marker
+    // ------------------------------------------------------------------
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void fanOut_claimsUnfannedEventsWithSkipLocked_andStampsFannedOut() {
+        UUID eventId = UUID.randomUUID();
+        UUID orgId = UUID.randomUUID();
+        UUID subId = UUID.randomUUID();
+        // One claimed, not-yet-fanned-out event for an org with one matching active subscription.
+        when(jdbc.query(anyString(), any(RowMapper.class))).thenAnswer(inv ->
+                List.of(new WebhookDispatchScheduler.ClaimedEvent(
+                        eventId, "subscription", subId.toString(), "SubscriptionActivated",
+                        "{\"org_id\":\"" + orgId + "\"}")));
+        WebhookSubscription sub = WebhookSubscription.builder()
+                .id(subId).orgId(orgId).url("https://203.0.113.10/cp").secretEnc(new byte[]{1})
+                .eventTypes(null).active(true).build();
+        when(subRepo.findByOrgIdAndActiveTrue(orgId)).thenReturn(List.of(sub));
+        when(subscriptionRepo.findById(subId)).thenReturn(java.util.Optional.empty());
+
+        scheduler().fanOut();
+
+        // The scan claims un-fanned rows with FOR UPDATE SKIP LOCKED, bounded + ordered.
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).query(sql.capture(), any(RowMapper.class));
+        String q = sql.getValue();
+        assertThat(q).contains("fanned_out_at IS NULL");
+        assertThat(q).contains("ORDER BY occurred_at ASC");
+        assertThat(q).contains("FOR UPDATE SKIP LOCKED");
+        assertThat(q).contains("LIMIT");
+
+        // A PENDING delivery is enqueued for the matching subscription (idempotent ON CONFLICT).
+        verify(jdbc).update(contains("INSERT INTO webhook_deliveries"), any(), eq(subId), eq(eventId));
+        // The event is durably marked fanned-out so it is never re-scanned (no time-window drop).
+        verify(jdbc).update(contains("SET fanned_out_at = ?"), any(), eq(eventId));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void fanOut_unroutableEventIsStillMarkedFannedOut_notRescannedForever() {
+        UUID eventId = UUID.randomUUID();
+        when(jdbc.query(anyString(), any(RowMapper.class))).thenAnswer(inv ->
+                List.of(new WebhookDispatchScheduler.ClaimedEvent(
+                        eventId, "subscription", "not-a-uuid", "SubscriptionSuspended", "{}")));
+
+        scheduler().fanOut();
+
+        // No org resolvable -> no delivery enqueued, but the event is still marked fanned-out.
+        verify(jdbc, never()).update(contains("INSERT INTO webhook_deliveries"), any(), any(), any());
+        verify(jdbc).update(contains("SET fanned_out_at = ?"), any(), eq(eventId));
+    }
+
+    // ------------------------------------------------------------------
+    //  Config knobs are honored (P2 dead-properties fix)
+    // ------------------------------------------------------------------
+
+    @Test
+    void configKnobs_maxAttemptsAndTimeout_areBoundFromConstructor() {
+        WebhookDispatchScheduler s = new WebhookDispatchScheduler(
+                subRepo, deliveryRepo, subscriptionRepo, tokenRepo, signer, keyEncryptor,
+                jdbc, urlGuard, null, 3, Duration.ofSeconds(7));
+        assertThat(s.maxAttempts()).isEqualTo(3);
+        assertThat(s.requestTimeout()).isEqualTo(Duration.ofSeconds(7));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void delivery_quarantinesAtConfiguredMaxAttempts_notHardcodedEight() throws Exception {
+        UUID id = UUID.randomUUID();
+        // Configure a max of 2; attempts already at 1, so this failure (the 2nd) trips FAILED.
+        WebhookDispatchScheduler s = new WebhookDispatchScheduler(
+                subRepo, deliveryRepo, subscriptionRepo, tokenRepo, signer, keyEncryptor,
+                jdbc, urlGuard, null, 2, Duration.ofSeconds(5));
+        s.setHttpClientForTest(httpClient);
+        stubOneClaimed(id, "LicenseRevoked", 1);
+        when(keyEncryptor.decrypt(any())).thenReturn("sekret".getBytes(StandardCharsets.UTF_8));
+        @SuppressWarnings("unchecked")
+        HttpResponse<Void> resp = mock(HttpResponse.class);
+        when(resp.statusCode()).thenReturn(500);
+        doReturn(resp).when(httpClient).send(any(HttpRequest.class), any());
+
+        s.deliverDueBatch();
+
+        verify(jdbc).update(contains("status = 'FAILED'"), eq(2), eq(500), contains("non-2xx"), eq(id));
+    }
+
+    // ------------------------------------------------------------------
+    //  DNS-rebind SSRF re-check before each delivery
+    // ------------------------------------------------------------------
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void delivery_destinationResolvesToPrivateIp_isRejectedAndCountedAsFailure_neverSent() throws Exception {
+        UUID id = UUID.randomUUID();
+        // A loopback URL (mirrors a rebind to an internal address): the per-delivery SSRF re-check must
+        // reject it BEFORE any POST and record a retryable failure.
+        WebhookDispatchScheduler.ClaimedDelivery row = new WebhookDispatchScheduler.ClaimedDelivery(
+                id, UUID.randomUUID(), UUID.randomUUID(), 0,
+                "https://127.0.0.1/cp", new byte[]{1, 2, 3},
+                "LicenseRevoked", "license_token", "jti-1", "{}");
+        when(jdbc.query(anyString(), any(RowMapper.class))).thenAnswer(inv -> List.of(row));
+        when(keyEncryptor.decrypt(any())).thenReturn("sekret".getBytes(StandardCharsets.UTF_8));
+
+        scheduler().deliverDueBatch();
+
+        verify(httpClient, never()).send(any(HttpRequest.class), any());
+        verify(jdbc).update(
+                argThat(sql -> sql.contains("next_attempt_at = ?") && !sql.contains("status = 'FAILED'")),
+                eq(1), eq((Integer) null), any(), contains("ssrf re-check failed"), eq(id));
     }
 
     // ------------------------------------------------------------------
@@ -202,8 +317,10 @@ class WebhookDispatchSchedulerTest {
     @SuppressWarnings("unchecked")
     void delivery_atMaxAttempts_quarantinesAsFailed() throws Exception {
         UUID id = UUID.randomUUID();
-        // attempts already MAX-1 so this failure becomes the MAX'th and trips the poison cap.
-        stubOneClaimed(id, "LicenseRevoked", WebhookDispatchScheduler.MAX_ATTEMPTS - 1);
+        // attempts already MAX-1 so this failure becomes the MAX'th and trips the poison cap
+        // (default app.webhooks.max-attempts = 8, configured on the scheduler under test).
+        int maxAttempts = 8;
+        stubOneClaimed(id, "LicenseRevoked", maxAttempts - 1);
         when(keyEncryptor.decrypt(any())).thenReturn("sekret".getBytes(StandardCharsets.UTF_8));
         @SuppressWarnings("unchecked")
         HttpResponse<Void> resp = mock(HttpResponse.class);
@@ -213,7 +330,7 @@ class WebhookDispatchSchedulerTest {
         scheduler().deliverDueBatch();
 
         verify(jdbc).update(contains("status = 'FAILED'"),
-                eq(WebhookDispatchScheduler.MAX_ATTEMPTS), eq(503), contains("non-2xx"), eq(id));
+                eq(maxAttempts), eq(503), contains("non-2xx"), eq(id));
         verify(jdbc, never()).update(contains("next_attempt_at = ?"), anyInt(), any(), any(), any(), eq(id));
     }
 
@@ -247,7 +364,8 @@ class WebhookDispatchSchedulerTest {
     private void stubOneClaimed(UUID id, String eventType, int attempts) {
         WebhookDispatchScheduler.ClaimedDelivery row = new WebhookDispatchScheduler.ClaimedDelivery(
                 id, UUID.randomUUID(), UUID.randomUUID(), attempts,
-                "https://hooks.example.com/endpoint", new byte[]{1, 2, 3},
+                // Literal TEST-NET-3 IP: passes the SSRF re-check hermetically (no DNS, public range).
+                "https://203.0.113.10/endpoint", new byte[]{1, 2, 3},
                 eventType, "license_token", "jti-123", "{\"jti\":\"jti-123\"}");
         when(jdbc.query(anyString(), any(RowMapper.class)))
                 .thenAnswer(inv -> {

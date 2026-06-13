@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { licenses, orgs, plans } from '@/lib/api';
+import { licenses, orgs, plans, subscriptions } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, CardBody, CardHeader, Spinner } from '@/components/ui';
 import { useAuth } from '@/lib/auth';
@@ -14,6 +14,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import type { License } from '@/lib/types';
 
 function Stat({
   label,
@@ -43,7 +44,28 @@ export function DashboardPage() {
   const { user } = useAuth();
   const orgsQ = useQuery({ queryKey: ['orgs'], queryFn: orgs.list });
   const plansQ = useQuery({ queryKey: ['plans'], queryFn: plans.list });
-  const licensesQ = useQuery({ queryKey: ['licenses'], queryFn: () => licenses.list() });
+
+  // The /licenses endpoint is now subscription-scoped (the tenant-leak fix), so there is no
+  // unscoped global list. Aggregate license activity client-side by walking each org's
+  // subscriptions and fetching that subscription's licenses. (Flagged: a backend aggregate
+  // endpoint would be cleaner — see crossCuttingNotes.)
+  const licensesQ = useQuery<License[]>({
+    queryKey: ['dashboard', 'licenses'],
+    enabled: !!orgsQ.data,
+    queryFn: async () => {
+      const orgList = orgsQ.data ?? [];
+      const subArrays = await Promise.all(
+        orgList.map((o) => subscriptions.listForOrg(o.id).catch(() => [])),
+      );
+      const subs = subArrays.flat();
+      const licArrays = await Promise.all(
+        subs.map((s) => licenses.listForSubscription(s.id).catch(() => [])),
+      );
+      return licArrays.flat();
+    },
+  });
+
+  const licensesLoading = orgsQ.isLoading || licensesQ.isLoading;
 
   const issuedByMonth = useMemo(() => {
     const data = licensesQ.data ?? [];
@@ -74,7 +96,7 @@ export function DashboardPage() {
   return (
     <div>
       <PageHeader
-        title={`Welcome${user?.displayName ? `, ${user.displayName}` : ''}`}
+        title={`Welcome${user?.fullName ? `, ${user.fullName}` : ''}`}
         description="A snapshot of customers, subscriptions, and license activity."
       />
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -83,13 +105,13 @@ export function DashboardPage() {
         <Stat
           label="Licenses this month"
           value={licensesThisMonth}
-          loading={licensesQ.isLoading}
+          loading={licensesLoading}
         />
         <Stat
           label="Active licenses"
           value={activeLicenses}
           hint="Not expired, not revoked"
-          loading={licensesQ.isLoading}
+          loading={licensesLoading}
         />
       </div>
 

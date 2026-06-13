@@ -3,13 +3,9 @@ package com.example.cp.sso;
 import com.example.cp.audit.AuditOutcome;
 import com.example.cp.audit.AuditWriter;
 import com.example.cp.auth.SessionTokenService;
-import com.example.cp.common.Ids;
 import com.example.cp.common.TrustedProxyResolver;
-import com.example.cp.orgs.OrgMember;
-import com.example.cp.orgs.OrgMemberRepository;
 import com.example.cp.rbac.AuthoritiesLoader;
 import com.example.cp.users.User;
-import com.example.cp.users.UserRepository;
 
 import java.util.Map;
 import java.util.Set;
@@ -29,8 +25,6 @@ import org.springframework.security.web.authentication.AuthenticationSuccessHand
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
-import java.time.OffsetDateTime;
-import java.util.Optional;
 import java.util.UUID;
 
 @Component
@@ -41,10 +35,9 @@ public class SsoSuccessHandler implements AuthenticationSuccessHandler {
     /** Session cookie name shared with {@code JwtAuthFilter}, which also accepts it as the bearer token. */
     public static final String SESSION_COOKIE = "cp_session";
 
-    private final UserRepository userRepo;
-    private final OrgMemberRepository memberRepo;
     private final SsoProviderRepository providerRepo;
     private final SsoIdentityRepository identityRepo;
+    private final SsoProvisioningService provisioningService;
     private final AuditWriter auditWriter;
     private final TrustedProxyResolver trustedProxyResolver;
     private final SessionTokenService sessionTokenService;
@@ -60,14 +53,13 @@ public class SsoSuccessHandler implements AuthenticationSuccessHandler {
     @Value("${app.auth.cookie-secure:true}")
     private boolean cookieSecure;
 
-    public SsoSuccessHandler(UserRepository userRepo, OrgMemberRepository memberRepo,
-                             SsoProviderRepository providerRepo, SsoIdentityRepository identityRepo,
+    public SsoSuccessHandler(SsoProviderRepository providerRepo, SsoIdentityRepository identityRepo,
+                             SsoProvisioningService provisioningService,
                              AuditWriter auditWriter, TrustedProxyResolver trustedProxyResolver,
                              SessionTokenService sessionTokenService, AuthoritiesLoader authoritiesLoader) {
-        this.userRepo = userRepo;
-        this.memberRepo = memberRepo;
         this.providerRepo = providerRepo;
         this.identityRepo = identityRepo;
+        this.provisioningService = provisioningService;
         this.auditWriter = auditWriter;
         this.trustedProxyResolver = trustedProxyResolver;
         this.sessionTokenService = sessionTokenService;
@@ -104,16 +96,14 @@ public class SsoSuccessHandler implements AuthenticationSuccessHandler {
 
         // 1) Strong binding: an existing (provider, subject) identity wins regardless of the asserted
         //    email, so a hostile IdP that changes the email it sends cannot hijack another account.
-        User user = null;
+        //    This is a READ here purely to decide whether the new-binding gates below apply; the
+        //    authoritative resolution happens transactionally inside SsoProvisioningService.
+        boolean alreadyBound = false;
         if (provider != null && subject != null) {
-            Optional<SsoIdentity> bound = identityRepo.findByProviderIdAndSubject(provider.getId(), subject);
-            if (bound.isPresent()) {
-                user = userRepo.findById(bound.get().getUserId()).orElse(null);
-            }
+            alreadyBound = identityRepo.findByProviderIdAndSubject(provider.getId(), subject).isPresent();
         }
 
-        boolean created = false;
-        if (user == null) {
+        if (!alreadyBound) {
             // 2) First login for this (provider, subject). Auto-linking by email and JIT provisioning
             //    are gated on the provider's verified-domain allow-list (#40); deny otherwise.
             if (provider == null) {
@@ -131,37 +121,23 @@ public class SsoSuccessHandler implements AuthenticationSuccessHandler {
                 response.sendRedirect(uiBaseUrl + "?sso=domain");
                 return;
             }
-            Optional<User> existing = userRepo.findByEmail(email);
-            created = existing.isEmpty();
-            // Never auto-promote to super_admin: jitCreateUser sets superAdmin=false; an existing
-            // user keeps its current flags (we only link, never elevate).
-            user = existing.orElseGet(() -> jitCreateUser(email, name));
-            if (created) {
-                // JIT provisioning must be audited (finding #5) since it bypasses UserService.createUser.
-                auditWriter.record(user.getId(), orgId, "user.created", "user", user.getId().toString(),
-                        Map.of("via", "sso", "email", mask(email)), ip, AuditOutcome.SUCCESS, false);
-            }
-            // 3) Persist the (provider, subject) -> user binding so future logins skip the email path.
-            if (subject != null) {
-                identityRepo.save(SsoIdentity.builder()
-                        .id(Ids.newId())
-                        .providerId(provider.getId())
-                        .subject(subject)
-                        .userId(user.getId())
-                        .createdAt(OffsetDateTime.now())
-                        .build());
-                auditWriter.record(user.getId(), provider.getOrgId(), "sso.identity.linked", "sso_identity",
-                        user.getId().toString(),
-                        Map.of("provider_id", provider.getId().toString(), "via", "sso"), ip, AuditOutcome.SUCCESS, false);
-            }
         }
 
-        if (orgId != null && ensureMembership(orgId, user.getId())) {
-            auditWriter.record(user.getId(), orgId, "org.member.added", "org_member", user.getId().toString(),
-                    Map.of("via", "sso", "role", OrgMember.Role.MEMBER.name()), ip, AuditOutcome.SUCCESS, false);
+        // 3) Provision atomically: the user create/link, the (provider, subject) identity binding, the
+        //    org membership, and their audit rows all commit in one transaction. A mid-sequence
+        //    failure rolls back the whole provisioning instead of leaving partial state.
+        User user;
+        try {
+            user = provisioningService.provision(provider, subject, email, name, orgId, mask(email), ip)
+                    .user();
+        } catch (RuntimeException e) {
+            log.warn("SSO provisioning failed for {} — no partial state committed: {}", mask(email), e.toString());
+            auditWriter.record(null, orgId, "sso.login", "sso",
+                    provider != null ? provider.getId().toString() : null,
+                    Map.of("reason", "provisioning-failed", "email", mask(email)), ip, AuditOutcome.DENIED, false);
+            response.sendRedirect(uiBaseUrl + "?sso=error");
+            return;
         }
-        auditWriter.record(user.getId(), orgId, "sso.login", "user", user.getId().toString(),
-                Map.of("email", mask(email)), ip, AuditOutcome.SUCCESS, false);
 
         // Mint a control-panel session JWT and set it as the cp_session cookie on the redirect so the
         // post-SSO browser is actually authenticated to the API (closes the broken-STATELESS gap).
@@ -255,30 +231,6 @@ public class SsoSuccessHandler implements AuthenticationSuccessHandler {
         int at = email.indexOf('@');
         if (at <= 1) return "***" + (at >= 0 ? email.substring(at) : "");
         return email.charAt(0) + "***" + email.substring(at);
-    }
-
-    private User jitCreateUser(String email, String name) {
-        User u = User.builder()
-                .id(Ids.newId())
-                .email(email)
-                .fullName(name)
-                .status(User.Status.ACTIVE)
-                .superAdmin(false)
-                .createdAt(OffsetDateTime.now())
-                .build();
-        return userRepo.save(u);
-    }
-
-    /** @return true if a new membership was created, false if it already existed. */
-    private boolean ensureMembership(UUID orgId, UUID userId) {
-        if (memberRepo.findByOrgIdAndUserId(orgId, userId).isPresent()) return false;
-        memberRepo.save(OrgMember.builder()
-                .orgId(orgId)
-                .userId(userId)
-                .role(OrgMember.Role.MEMBER)
-                .addedAt(OffsetDateTime.now())
-                .build());
-        return true;
     }
 
     private String extractEmail(Authentication auth) {
