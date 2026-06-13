@@ -46,7 +46,7 @@ jobs:
       # Always upload JaCoCo reports (report-only; no enforced threshold yet) for inspection.
       - name: Upload JaCoCo coverage reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: jacoco-coverage
           path: '**/target/site/jacoco/'
@@ -127,7 +127,7 @@ jobs:
 
       - name: Upload OWASP dependency-check report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: owasp-dependency-check
           path: '**/target/dependency-check-report.*'
