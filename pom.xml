@@ -36,7 +36,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
-        <nimbus-jose-jwt.version>9.40</nimbus-jose-jwt.version>
+        <nimbus-jose-jwt.version>10.9.1</nimbus-jose-jwt.version>
         <lombok.version>1.18.40</lombok.version>
         <springdoc-openapi.version>2.6.0</springdoc-openapi.version>
         <bucket4j.version>0.12.8</bucket4j.version>
