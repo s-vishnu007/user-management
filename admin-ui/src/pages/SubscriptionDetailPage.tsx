@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { motion } from 'framer-motion';
 import {
   apiErrorMessage,
   licenses,
@@ -23,6 +24,7 @@ import { DataTable, type Column } from '@/components/DataTable';
 import { PermissionGate } from '@/components/PermissionGate';
 import { useToast } from '@/lib/toast';
 import { triggerDownload } from '@/lib/download';
+import { fadeRise, staggerContainer } from '@/lib/motion';
 import type { License } from '@/lib/types';
 
 export function SubscriptionDetailPage() {
@@ -108,7 +110,12 @@ export function SubscriptionDetailPage() {
   };
 
   if (subQ.isLoading) return <PageLoader />;
-  if (subQ.isError) return <div className="text-rose-600">{apiErrorMessage(subQ.error)}</div>;
+  if (subQ.isError)
+    return (
+      <div className="rounded-xl border border-danger-200 bg-danger-50/70 px-4 py-3 text-sm text-danger-700">
+        {apiErrorMessage(subQ.error)}
+      </div>
+    );
   const sub = subQ.data!;
 
   const licenseColumns: Column<License>[] = [
@@ -167,7 +174,10 @@ export function SubscriptionDetailPage() {
         title={`Subscription · ${sub.planName ?? sub.planCode ?? sub.planId}`}
         description={`Organization: ${sub.orgName ?? sub.orgId}`}
         breadcrumb={
-          <Link to={`/orgs/${sub.orgId}`} className="hover:text-brand-700">
+          <Link
+            to={`/orgs/${sub.orgId}`}
+            className="rounded-sm text-ink-faint transition-colors hover:text-indigo-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
+          >
             {sub.orgName ?? sub.orgId}
           </Link>
         }
@@ -197,62 +207,85 @@ export function SubscriptionDetailPage() {
         }
       />
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        <Card>
-          <CardHeader title="Overview" />
-          <CardBody>
-            <dl className="space-y-3 text-sm">
-              <div className="flex items-center justify-between">
-                <dt className="text-slate-500">Status</dt>
-                <dd>
-                  <StatusBadge status={sub.status} />
-                </dd>
-              </div>
-              <div className="flex items-center justify-between">
-                <dt className="text-slate-500">Seats</dt>
-                <dd className="font-medium">{sub.seats}</dd>
-              </div>
-              <div className="flex items-center justify-between">
-                <dt className="text-slate-500">Starts</dt>
-                <dd>{new Date(sub.startsAt).toLocaleDateString()}</dd>
-              </div>
-              <div className="flex items-center justify-between">
-                <dt className="text-slate-500">Ends</dt>
-                <dd>{new Date(sub.endsAt).toLocaleDateString()}</dd>
-              </div>
-              {sub.createdAt && (
-                <div className="flex items-center justify-between">
-                  <dt className="text-slate-500">Created</dt>
-                  <dd>{new Date(sub.createdAt).toLocaleDateString()}</dd>
+      <motion.div
+        className="grid grid-cols-1 gap-6 lg:grid-cols-3"
+        variants={staggerContainer}
+        initial="hidden"
+        animate="show"
+      >
+        <motion.div variants={fadeRise}>
+          <Card className="h-full">
+            <CardHeader title="Overview" />
+            <CardBody>
+              <dl className="divide-y divide-slate-900/5 text-sm">
+                <div className="flex items-center justify-between py-2.5 first:pt-0">
+                  <dt className="text-ink-muted">Status</dt>
+                  <dd>
+                    <StatusBadge status={sub.status} />
+                  </dd>
                 </div>
+                <div className="flex items-center justify-between py-2.5">
+                  <dt className="text-ink-muted">Seats</dt>
+                  <dd className="font-semibold tabular-nums text-ink">{sub.seats}</dd>
+                </div>
+                <div className="flex items-center justify-between py-2.5">
+                  <dt className="text-ink-muted">Starts</dt>
+                  <dd className="tabular-nums text-ink-soft">
+                    {new Date(sub.startsAt).toLocaleDateString()}
+                  </dd>
+                </div>
+                <div className="flex items-center justify-between py-2.5">
+                  <dt className="text-ink-muted">Ends</dt>
+                  <dd className="tabular-nums text-ink-soft">
+                    {new Date(sub.endsAt).toLocaleDateString()}
+                  </dd>
+                </div>
+                {sub.createdAt && (
+                  <div className="flex items-center justify-between py-2.5 last:pb-0">
+                    <dt className="text-ink-muted">Created</dt>
+                    <dd className="tabular-nums text-ink-soft">
+                      {new Date(sub.createdAt).toLocaleDateString()}
+                    </dd>
+                  </div>
+                )}
+              </dl>
+            </CardBody>
+          </Card>
+        </motion.div>
+
+        <motion.div variants={fadeRise} className="lg:col-span-2">
+          <Card className="h-full">
+            <CardHeader
+              title="Overrides"
+              description="Per-subscription deltas applied on top of the plan."
+            />
+            <CardBody>
+              {!sub.overrides || sub.overrides.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-slate-300/70 bg-white/40 px-4 py-6 text-center text-sm text-ink-muted">
+                  No overrides — uses plan defaults.
+                </div>
+              ) : (
+                <ul className="space-y-2 text-sm">
+                  {sub.overrides.map((o, i) => (
+                    <li
+                      key={i}
+                      className="flex items-center gap-2 rounded-lg border border-slate-900/5 bg-white/50 px-3 py-2"
+                    >
+                      <Badge tone="info">{o.type}</Badge>
+                      <code className="font-mono text-xs text-ink-soft">{o.key}</code>
+                      {o.value !== undefined ? (
+                        <span className="text-ink-muted"> = {String(o.value)}</span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
               )}
-            </dl>
-          </CardBody>
-        </Card>
+            </CardBody>
+          </Card>
+        </motion.div>
+      </motion.div>
 
-        <Card className="lg:col-span-2">
-          <CardHeader title="Overrides" description="Per-subscription deltas applied on top of the plan." />
-          <CardBody>
-            {(!sub.overrides || sub.overrides.length === 0) ? (
-              <div className="text-sm text-slate-500">No overrides — uses plan defaults.</div>
-            ) : (
-              <ul className="space-y-2 text-sm">
-                {sub.overrides.map((o, i) => (
-                  <li key={i} className="flex items-center gap-2">
-                    <Badge tone="info">{o.type}</Badge>
-                    <code className="text-xs">{o.key}</code>
-                    {o.value !== undefined ? (
-                      <span className="text-slate-500"> = {String(o.value)}</span>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </CardBody>
-        </Card>
-      </div>
-
-      <div className="mt-6">
+      <motion.div className="mt-6" variants={fadeRise} initial="hidden" animate="show">
         <Card>
           <CardHeader
             title="Licenses"
@@ -273,7 +306,7 @@ export function SubscriptionDetailPage() {
             empty={licsQ.isError ? apiErrorMessage(licsQ.error) : 'No licenses issued yet.'}
           />
         </Card>
-      </div>
+      </motion.div>
 
       <Dialog
         open={issueOpen}

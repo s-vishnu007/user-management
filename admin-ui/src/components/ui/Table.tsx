@@ -10,32 +10,40 @@ export function Table({ className, ...rest }: HTMLAttributes<HTMLTableElement>) 
 }
 
 export function THead({ className, ...rest }: HTMLAttributes<HTMLTableSectionElement>) {
-  return <thead className={cn('bg-slate-50 text-slate-600', className)} {...rest} />;
+  return (
+    <thead
+      className={cn(
+        'glass-sticky text-xs font-semibold uppercase tracking-wide text-ink-muted',
+        className,
+      )}
+      {...rest}
+    />
+  );
 }
 
 export function TBody({ className, ...rest }: HTMLAttributes<HTMLTableSectionElement>) {
-  return <tbody className={cn('divide-y divide-slate-100', className)} {...rest} />;
+  return (
+    <tbody className={cn('divide-y divide-slate-900/5', className)} {...rest} />
+  );
 }
 
 export function TR({ className, ...rest }: HTMLAttributes<HTMLTableRowElement>) {
-  return <tr className={cn('hover:bg-slate-50/60', className)} {...rest} />;
+  return <tr className={cn('transition-colors hover:bg-indigo-50/40', className)} {...rest} />;
 }
 
 export function TH({ className, ...rest }: ThHTMLAttributes<HTMLTableCellElement>) {
   return (
     <th
-      className={cn('px-4 py-2.5 text-left text-xs font-medium uppercase tracking-wide', className)}
+      className={cn('px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide', className)}
       {...rest}
     />
   );
 }
 
 export function TD({ className, ...rest }: TdHTMLAttributes<HTMLTableCellElement>) {
-  return <td className={cn('px-4 py-2.5 text-slate-700', className)} {...rest} />;
+  return <td className={cn('px-4 py-2.5 text-ink-soft', className)} {...rest} />;
 }
 
 export function EmptyState({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="py-12 text-center text-sm text-slate-500">{children}</div>
-  );
+  return <div className="py-12 text-center text-sm text-ink-muted">{children}</div>;
 }

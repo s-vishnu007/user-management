@@ -3,12 +3,17 @@ import { cn } from '@/lib/cn';
 
 type Tone = 'neutral' | 'success' | 'warning' | 'danger' | 'info';
 
+/**
+ * AURORA GLASS tonal status pills. Each tone pairs a soft tinted fill with a
+ * readable AA text color and an inset ring, so meaning never rests on color
+ * alone (callers also pass a label). `info` maps to the indigo brand accent.
+ */
 const toneClasses: Record<Tone, string> = {
-  neutral: 'bg-slate-100 text-slate-700 ring-slate-200',
-  success: 'bg-emerald-50 text-emerald-700 ring-emerald-200',
-  warning: 'bg-amber-50 text-amber-700 ring-amber-200',
-  danger: 'bg-rose-50 text-rose-700 ring-rose-200',
-  info: 'bg-brand-50 text-brand-700 ring-brand-200',
+  neutral: 'bg-slate-100/80 text-ink-soft ring-slate-300/70',
+  success: 'bg-success-50/90 text-success-700 ring-success-200',
+  warning: 'bg-warn-50/90 text-warn-700 ring-warn-200',
+  danger: 'bg-danger-50/90 text-danger-700 ring-danger-200',
+  info: 'bg-brand-50/90 text-brand-700 ring-brand-200',
 };
 
 export function Badge({

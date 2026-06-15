@@ -2,8 +2,23 @@
 @tailwind components;
 @tailwind utilities;
 
+/* =============================================================================
+   AURORA GLASS — base layer
+   Light mode only. color-scheme stays light; backgrounds light, text dark.
+   ========================================================================== */
+
 :root {
   color-scheme: light;
+  /* Aurora mesh hues (kept in sync with tailwind `aurora` tokens). */
+  --aurora-indigo: 99, 102, 241;
+  --aurora-violet: 168, 85, 247;
+  --aurora-fuchsia: 217, 70, 239;
+  --aurora-cyan: 34, 211, 238;
+  --aurora-sky: 56, 189, 248;
+  /* Glass surface opacities — the contrast contract. */
+  --glass-card: 0.7; /* text/data panels */
+  --glass-chrome: 0.6; /* nav / topbar */
+  --glass-sticky: 0.8; /* sticky headers (content scrolls under) */
 }
 
 html,
@@ -13,8 +28,258 @@ body,
 }
 
 body {
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    'Helvetica Neue', Arial, sans-serif;
+  background-color: #f6f7fb;
+  color: #0f172a; /* ink — dark, high-contrast default */
+  font-family: 'Inter Variable', Inter, ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-feature-settings: 'cv11', 'ss01';
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+}
+
+/* -----------------------------------------------------------------------------
+   Aurora mesh backdrop — fixed, pointer-events:none, behind all content.
+   Stacked radial gradients faded to transparent over the near-white canvas.
+   Animated cheaply (transform on a promoted layer), gated behind motion-safe.
+   -------------------------------------------------------------------------- */
+body::before {
+  content: '';
+  position: fixed;
+  inset: -10%; /* overscan so the drift never reveals an edge */
+  z-index: -1;
+  pointer-events: none;
+  transform: translateZ(0); /* promote to its own compositor layer */
+  background-image:
+    radial-gradient(40rem 40rem at 12% 8%, rgba(var(--aurora-indigo), 0.26), transparent 60%),
+    radial-gradient(36rem 36rem at 88% 12%, rgba(var(--aurora-violet), 0.2), transparent 60%),
+    radial-gradient(44rem 44rem at 75% 85%, rgba(var(--aurora-cyan), 0.18), transparent 62%),
+    radial-gradient(34rem 34rem at 15% 92%, rgba(var(--aurora-sky), 0.16), transparent 60%);
+}
+
+/* A second, softly-blurred blob layer adds depth without a second backdrop-filter. */
+body::after {
+  content: '';
+  position: fixed;
+  inset: -10%;
+  z-index: -1;
+  pointer-events: none;
+  filter: blur(60px);
+  opacity: 0.55;
+  transform: translateZ(0);
+  background-image:
+    radial-gradient(22rem 22rem at 70% 20%, rgba(var(--aurora-fuchsia), 0.14), transparent 65%),
+    radial-gradient(26rem 26rem at 25% 60%, rgba(var(--aurora-indigo), 0.12), transparent 65%);
+}
+
+/* -----------------------------------------------------------------------------
+   Typography defaults
+   -------------------------------------------------------------------------- */
+h1,
+h2 {
+  font-family: 'Sora Variable', Sora, ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: -0.02em;
+}
+
+/* -----------------------------------------------------------------------------
+   Focus-visible rings — visible, accessible, consistent across primitives.
+   -------------------------------------------------------------------------- */
+:where(a, button, [role='button'], input, select, textarea, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px #ffffff,
+    0 0 0 4px rgba(99, 102, 241, 0.6);
+  border-radius: 0.5rem;
+}
+
+/* -----------------------------------------------------------------------------
+   Custom scrollbars — slim, light, unobtrusive.
+   -------------------------------------------------------------------------- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(100, 116, 139, 0.35) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background-color: rgba(100, 116, 139, 0.3);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(100, 116, 139, 0.5);
+  background-clip: content-box;
+}
+
+/* =============================================================================
+   GLASS COMPONENT UTILITIES (@layer components)
+   Apply via className; downstream agents compose these with Tailwind utilities.
+   ========================================================================== */
+@layer components {
+  /* Base frosted glass — readable AA surface for cards/panels with text. */
+  .glass {
+    background-color: rgba(255, 255, 255, var(--glass-card));
+    -webkit-backdrop-filter: blur(14px) saturate(170%);
+    backdrop-filter: blur(14px) saturate(170%);
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    box-shadow:
+      0 1px 1px rgba(16, 24, 40, 0.04),
+      0 4px 8px rgba(16, 24, 40, 0.05),
+      0 12px 24px rgba(16, 24, 40, 0.06),
+      inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  }
+
+  /* Card preset — glass + the canonical 2xl radius. */
+  .glass-card {
+    border-radius: 1rem;
+    background-color: rgba(255, 255, 255, var(--glass-card));
+    -webkit-backdrop-filter: blur(14px) saturate(170%);
+    backdrop-filter: blur(14px) saturate(170%);
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    box-shadow:
+      0 1px 1px rgba(16, 24, 40, 0.04),
+      0 4px 8px rgba(16, 24, 40, 0.05),
+      0 12px 24px rgba(16, 24, 40, 0.06),
+      inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  }
+
+  /* Denser, more opaque surface for data tables / forms — contrast never
+     depends on the busy backdrop. */
+  .glass-solid {
+    background-color: rgba(255, 255, 255, 0.85);
+    -webkit-backdrop-filter: blur(12px) saturate(150%);
+    backdrop-filter: blur(12px) saturate(150%);
+    border: 1px solid rgba(255, 255, 255, 0.6);
+  }
+
+  /* App chrome — sidebar / topbar: heavier blur, thinner surface. */
+  .glass-nav {
+    background-color: rgba(255, 255, 255, var(--glass-chrome));
+    -webkit-backdrop-filter: blur(18px) saturate(160%);
+    backdrop-filter: blur(18px) saturate(160%);
+  }
+
+  /* Sticky headers (table head / topbar): more opaque so content scrolling
+     under doesn't bleed through and break legibility. */
+  .glass-sticky {
+    background-color: rgba(255, 255, 255, var(--glass-sticky));
+    -webkit-backdrop-filter: blur(16px) saturate(160%);
+    backdrop-filter: blur(16px) saturate(160%);
+  }
+
+  /* Tooltip / floating glass — small, crisp, high opacity. */
+  .glass-pop {
+    background-color: rgba(255, 255, 255, 0.9);
+    -webkit-backdrop-filter: blur(12px) saturate(160%);
+    backdrop-filter: blur(12px) saturate(160%);
+    border: 1px solid rgba(255, 255, 255, 0.7);
+  }
+
+  /* Live/status dot pulse — compositor-only ring via a pseudo-element.
+     The ring scales + fades (transform/opacity) instead of animating box-shadow
+     spread, so it never triggers a per-frame repaint. Host the class on the dot;
+     `motion-safe:` gating on the host element keeps reduced-motion users still. */
+  .pulse-ring {
+    position: relative;
+  }
+  .pulse-ring::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    height: 100%;
+    width: 100%;
+    border-radius: 9999px;
+    background-color: rgba(16, 185, 129, 0.45);
+    transform: translate(-50%, -50%) scale(1);
+    pointer-events: none;
+    animation: pulse-ring 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .pulse-ring::after {
+      animation: none;
+      opacity: 0;
+    }
+  }
+
+  /* Skeleton shimmer block. */
+  .skeleton {
+    background-image: linear-gradient(
+      90deg,
+      rgba(148, 163, 184, 0.12) 0%,
+      rgba(148, 163, 184, 0.28) 50%,
+      rgba(148, 163, 184, 0.12) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.6s linear infinite;
+    border-radius: 0.5rem;
+  }
+}
+
+/* =============================================================================
+   ACCESSIBILITY GATES — all three ship together.
+   ========================================================================== */
+
+/* 1) No backdrop-filter support -> near-opaque solid surfaces (never transparent). */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass,
+  .glass-card,
+  .glass-solid,
+  .glass-pop {
+    background-color: rgba(255, 255, 255, 0.94);
+  }
+  .glass-nav,
+  .glass-sticky {
+    background-color: rgba(255, 255, 255, 0.96);
+  }
+}
+
+/* 2) Reduced transparency -> drop blur, fully solid surfaces. */
+@media (prefers-reduced-transparency: reduce) {
+  .glass,
+  .glass-card,
+  .glass-solid,
+  .glass-nav,
+  .glass-sticky,
+  .glass-pop {
+    background-color: #ffffff;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  body::before,
+  body::after {
+    opacity: 0.5;
+  }
+}
+
+/* 3) Reduced motion -> kill animations/transitions + freeze the aurora drift. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  body::before,
+  body::after {
+    animation: none !important;
+  }
+}
+
+/* Ambient aurora drift — only for users who allow motion. */
+@media (prefers-reduced-motion: no-preference) {
+  body::before {
+    animation: aurora-drift 28s ease-in-out infinite alternate;
+  }
+  body::after {
+    animation: aurora-drift 36s ease-in-out infinite alternate-reverse;
+  }
 }

@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import { motion } from 'framer-motion';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -27,6 +28,7 @@ import {
 import { DataTable, type Column } from '@/components/DataTable';
 import { PermissionGate } from '@/components/PermissionGate';
 import { useToast } from '@/lib/toast';
+import { fadeRise } from '@/lib/motion';
 import type { AuditEntry, OrgMember, Subscription } from '@/lib/types';
 
 const ROLES = ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'] as const;
@@ -48,7 +50,10 @@ export function OrgDetailPage() {
         title={orgQ.data?.name ?? 'Organization'}
         description={orgQ.data ? `Slug: ${orgQ.data.slug}` : undefined}
         breadcrumb={
-          <Link to="/orgs" className="hover:text-brand-700">
+          <Link
+            to="/orgs"
+            className="rounded-sm text-ink-muted transition-colors hover:text-indigo-700"
+          >
             Organizations
           </Link>
         }
@@ -83,16 +88,16 @@ export function OrgDetailPage() {
         ]}
       />
 
-      <div className="mt-6">
+      <motion.div key={tab} variants={fadeRise} initial="hidden" animate="show" className="mt-6">
         {tab === 'members' && <MembersTab orgId={orgId} />}
         {tab === 'subscriptions' && <SubscriptionsTab orgId={orgId} />}
         {tab === 'sso' && (
           <Card>
             <CardBody>
-              <p className="text-sm text-slate-600">
+              <p className="text-sm text-ink-soft">
                 Configure SAML or OIDC for this organization.
               </p>
-              <div className="mt-3">
+              <div className="mt-4">
                 <Link to={`/orgs/${orgId}/sso`}>
                   <Button>Open SSO settings</Button>
                 </Link>
@@ -103,10 +108,10 @@ export function OrgDetailPage() {
         {tab === 'apiKeys' && (
           <Card>
             <CardBody>
-              <p className="text-sm text-slate-600">
+              <p className="text-sm text-ink-soft">
                 Manage API keys for programmatic control plane access.
               </p>
-              <div className="mt-3">
+              <div className="mt-4">
                 <Link to={`/orgs/${orgId}/api-keys`}>
                   <Button>Open API keys</Button>
                 </Link>
@@ -115,7 +120,7 @@ export function OrgDetailPage() {
           </Card>
         )}
         {tab === 'audit' && <OrgAuditTab orgId={orgId} />}
-      </div>
+      </motion.div>
     </div>
   );
 }
@@ -157,17 +162,26 @@ function MembersTab({ orgId }: { orgId: string }) {
   });
 
   const columns: Column<OrgMember>[] = [
-    { key: 'email', header: 'Email', render: (m) => m.email },
+    {
+      key: 'email',
+      header: 'Email',
+      render: (m) => <span className="font-medium text-ink">{m.email}</span>,
+    },
     {
       key: 'name',
       header: 'Name',
-      render: (m) => m.displayName ?? '—',
+      render: (m) => m.displayName ?? <span className="text-ink-faint">—</span>,
     },
     { key: 'role', header: 'Role', render: (m) => <Badge tone="info">{m.role}</Badge> },
     {
       key: 'joinedAt',
       header: 'Joined',
-      render: (m) => (m.joinedAt ? new Date(m.joinedAt).toLocaleDateString() : '—'),
+      render: (m) =>
+        m.joinedAt ? (
+          new Date(m.joinedAt).toLocaleDateString()
+        ) : (
+          <span className="text-ink-faint">—</span>
+        ),
     },
     {
       key: 'actions',
@@ -199,7 +213,9 @@ function MembersTab({ orgId }: { orgId: string }) {
         empty={membersQ.isError ? apiErrorMessage(membersQ.error) : 'No members yet.'}
         toolbar={
           <div className="flex w-full items-center justify-between">
-            <span className="text-sm text-slate-500">{membersQ.data?.length ?? 0} members</span>
+            <span className="text-sm tabular-nums text-ink-muted">
+              {membersQ.data?.length ?? 0} members
+            </span>
             <PermissionGate permission="org.members.add">
               <Button size="sm" onClick={() => setOpen(true)}>
                 Add member
@@ -262,7 +278,9 @@ function SubscriptionsTab({ orgId }: { orgId: string }) {
     {
       key: 'plan',
       header: 'Plan',
-      render: (s) => <span className="font-medium text-slate-900">{s.planName ?? s.planCode ?? s.planId}</span>,
+      render: (s) => (
+        <span className="font-medium text-ink">{s.planName ?? s.planCode ?? s.planId}</span>
+      ),
     },
     { key: 'status', header: 'Status', render: (s) => <StatusBadge status={s.status} /> },
     { key: 'seats', header: 'Seats', render: (s) => s.seats },
@@ -295,7 +313,7 @@ function SubscriptionsTab({ orgId }: { orgId: string }) {
       empty={subsQ.isError ? apiErrorMessage(subsQ.error) : 'No subscriptions for this org.'}
       toolbar={
         <div className="flex w-full items-center justify-between">
-          <span className="text-sm text-slate-500">
+          <span className="text-sm tabular-nums text-ink-muted">
             {subsQ.data?.length ?? 0} subscriptions
           </span>
           <PermissionGate permission="subscription.create">
@@ -324,22 +342,30 @@ function OrgAuditTab({ orgId }: { orgId: string }) {
       header: 'When',
       render: (a) => new Date(a.occurredAt).toLocaleString(),
     },
-    { key: 'actor', header: 'Actor', render: (a) => a.actorEmail ?? a.actorId ?? '—' },
+    {
+      key: 'actor',
+      header: 'Actor',
+      render: (a) => a.actorEmail ?? a.actorId ?? <span className="text-ink-faint">—</span>,
+    },
     {
       key: 'action',
       header: 'Action',
-      render: (a) => <code className="text-xs">{a.action}</code>,
+      render: (a) => (
+        <code className="rounded bg-slate-100/70 px-1.5 py-0.5 font-mono text-xs text-ink-soft">
+          {a.action}
+        </code>
+      ),
     },
     {
       key: 'target',
       header: 'Target',
       render: (a) =>
         a.targetType ? (
-          <span>
-            <span className="text-slate-500">{a.targetType}</span> · {a.targetId ?? ''}
+          <span className="text-ink-soft">
+            <span className="text-ink-muted">{a.targetType}</span> · {a.targetId ?? ''}
           </span>
         ) : (
-          '—'
+          <span className="text-ink-faint">—</span>
         ),
     },
   ];

@@ -57,9 +57,17 @@ export function OrgsListPage() {
     {
       key: 'name',
       header: 'Name',
-      render: (o) => <span className="font-medium text-slate-900">{o.name}</span>,
+      render: (o) => <span className="font-medium text-ink">{o.name}</span>,
     },
-    { key: 'slug', header: 'Slug', render: (o) => <code className="text-xs">{o.slug}</code> },
+    {
+      key: 'slug',
+      header: 'Slug',
+      render: (o) => (
+        <code className="rounded bg-slate-100/70 px-1.5 py-0.5 font-mono text-xs text-ink-soft">
+          {o.slug}
+        </code>
+      ),
+    },
     {
       key: 'status',
       header: 'Status',
@@ -99,13 +107,17 @@ export function OrgsListPage() {
         empty={orgsQ.isError ? apiErrorMessage(orgsQ.error) : 'No organizations yet.'}
         onRowClick={(o) => navigate(`/orgs/${o.id}`)}
         toolbar={
-          <div className="flex w-full items-center gap-2">
+          <div className="flex w-full items-center justify-between gap-3">
             <Input
               placeholder="Search by name or slug"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
+              aria-label="Search organizations by name or slug"
               className="max-w-sm"
             />
+            <span className="hidden shrink-0 text-sm tabular-nums text-ink-muted sm:inline">
+              {filtered.length} {filtered.length === 1 ? 'organization' : 'organizations'}
+            </span>
           </div>
         }
       />

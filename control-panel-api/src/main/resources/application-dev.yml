@@ -24,6 +24,33 @@ springdoc:
     enabled: true
 
 app:
+  # ---------------------------------------------------------------------------
+  # DEV-ONLY bootstrap super-admin (see com.example.cp.auth.DevBootstrapAdmin).
+  #
+  # On startup, IF the users table is empty, the dev profile seeds:
+  #   * an ACTIVE organization with slug 'acme' (name from `org-name` below),
+  #   * a super-admin user (super_admin=true, ACTIVE) with the email/password below
+  #     (password is bcrypt-hashed via the shared PasswordEncoder bean), and
+  #   * an OWNER org_members row linking the two.
+  # The credentials actually used are logged at WARN so you can sign in immediately.
+  #
+  # This is impossible to run outside dev: the bean is @Profile("dev"), the seed is
+  # idempotent (only runs when zero users exist), and it never touches the test
+  # profile (tests run under @ActiveProfiles("test")). It adds NO migration.
+  #
+  # Env-var overrides (env wins over these YAML defaults):
+  #   APP_BOOTSTRAP_ADMIN_EMAIL    -> admin login email   (default admin@example.com)
+  #   APP_BOOTSTRAP_ADMIN_PASSWORD -> admin login password (default Admin123!ChangeMe)
+  #   APP_BOOTSTRAP_ORG_NAME       -> organization display name (default "Acme (dev)")
+  # Set `enabled: false` (or app.dev.bootstrap-admin.enabled=false) to disable seeding
+  # while keeping the dev profile active.
+  # ---------------------------------------------------------------------------
+  dev:
+    bootstrap-admin:
+      enabled: true
+      email: ${APP_BOOTSTRAP_ADMIN_EMAIL:admin@example.com}
+      password: ${APP_BOOTSTRAP_ADMIN_PASSWORD:Admin123!ChangeMe}
+      org-name: ${APP_BOOTSTRAP_ORG_NAME:Acme (dev)}
   auth:
     # Return the raw password-reset token in the API response so local devs can
     # complete a reset without an email server. Prod default (application.yml) is false.

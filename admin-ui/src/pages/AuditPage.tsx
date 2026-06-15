@@ -1,9 +1,11 @@
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { motion } from 'framer-motion';
 import { apiErrorMessage, audit } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
-import { Button, Input } from '@/components/ui';
+import { Button, Card, CardBody, Field, Input } from '@/components/ui';
 import { DataTable, type Column } from '@/components/DataTable';
+import { fadeRise } from '@/lib/motion';
 import type { AuditEntry } from '@/lib/types';
 
 export function AuditPage() {
@@ -24,26 +26,56 @@ export function AuditPage() {
   const items = useMemo(() => auditQ.data?.items ?? [], [auditQ.data]);
 
   const columns: Column<AuditEntry>[] = [
-    { key: 'when', header: 'When', render: (a) => new Date(a.occurredAt).toLocaleString() },
-    { key: 'actor', header: 'Actor', render: (a) => a.actorEmail ?? a.actorId ?? '—' },
+    {
+      key: 'when',
+      header: 'When',
+      width: '15rem',
+      render: (a) => (
+        <span className="whitespace-nowrap tabular-nums text-ink-soft">
+          {new Date(a.occurredAt).toLocaleString()}
+        </span>
+      ),
+    },
+    {
+      key: 'actor',
+      header: 'Actor',
+      render: (a) => (
+        <span className="font-medium text-ink">{a.actorEmail ?? a.actorId ?? '—'}</span>
+      ),
+    },
     {
       key: 'action',
       header: 'Action',
-      render: (a) => <code className="text-xs">{a.action}</code>,
+      render: (a) => (
+        <code className="inline-flex items-center rounded-md bg-aurora-chip px-1.5 py-0.5 font-mono text-xs text-indigo-700 ring-1 ring-inset ring-indigo-500/15">
+          {a.action}
+        </code>
+      ),
     },
     {
       key: 'target',
       header: 'Target',
       render: (a) =>
         a.targetType ? (
-          <span>
-            <span className="text-slate-500">{a.targetType}</span> · {a.targetId ?? ''}
+          <span className="text-ink-soft">
+            <span className="text-ink-faint">{a.targetType}</span>
+            <span className="mx-1 text-ink-ghost">·</span>
+            <span className="font-mono text-xs text-ink-muted">{a.targetId ?? ''}</span>
           </span>
         ) : (
-          '—'
+          <span className="text-ink-faint">—</span>
         ),
     },
-    { key: 'ip', header: 'IP', render: (a) => a.ip ?? '—' },
+    {
+      key: 'ip',
+      header: 'IP',
+      render: (a) =>
+        a.ip ? (
+          <span className="font-mono text-xs text-ink-muted">{a.ip}</span>
+        ) : (
+          <span className="text-ink-faint">—</span>
+        ),
+    },
   ];
 
   return (
@@ -53,34 +85,55 @@ export function AuditPage() {
         description="Every write in the control panel produces an audit entry. Immutable, append-only."
       />
 
-      <div className="mb-4 grid grid-cols-1 gap-2 rounded-lg border border-slate-200 bg-white p-3 md:grid-cols-6">
-        <Input
-          placeholder="Actor email or ID"
-          value={filters.actorId}
-          onChange={(e) => setFilters((f) => ({ ...f, actorId: e.target.value }))}
-        />
-        <Input
-          placeholder="Action (e.g. license.issued)"
-          value={filters.action}
-          onChange={(e) => setFilters((f) => ({ ...f, action: e.target.value }))}
-        />
-        <Input
-          placeholder="Target type"
-          value={filters.targetType}
-          onChange={(e) => setFilters((f) => ({ ...f, targetType: e.target.value }))}
-        />
-        <Input
-          type="date"
-          value={filters.from}
-          onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))}
-        />
-        <Input
-          type="date"
-          value={filters.to}
-          onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))}
-        />
-        <Button onClick={() => setApplied(filters)}>Apply</Button>
-      </div>
+      <motion.div variants={fadeRise} initial="hidden" animate="show">
+        <Card className="mb-4">
+          <CardBody className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 xl:items-end">
+            <Field label="Actor" htmlFor="filter-actor">
+              <Input
+                id="filter-actor"
+                placeholder="Email or ID"
+                value={filters.actorId}
+                onChange={(e) => setFilters((f) => ({ ...f, actorId: e.target.value }))}
+              />
+            </Field>
+            <Field label="Action" htmlFor="filter-action">
+              <Input
+                id="filter-action"
+                placeholder="e.g. license.issued"
+                value={filters.action}
+                onChange={(e) => setFilters((f) => ({ ...f, action: e.target.value }))}
+              />
+            </Field>
+            <Field label="Target type" htmlFor="filter-target">
+              <Input
+                id="filter-target"
+                placeholder="e.g. subscription"
+                value={filters.targetType}
+                onChange={(e) => setFilters((f) => ({ ...f, targetType: e.target.value }))}
+              />
+            </Field>
+            <Field label="From" htmlFor="filter-from">
+              <Input
+                id="filter-from"
+                type="date"
+                value={filters.from}
+                onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))}
+              />
+            </Field>
+            <Field label="To" htmlFor="filter-to">
+              <Input
+                id="filter-to"
+                type="date"
+                value={filters.to}
+                onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))}
+              />
+            </Field>
+            <Button className="w-full justify-center" onClick={() => setApplied(filters)}>
+              Apply
+            </Button>
+          </CardBody>
+        </Card>
+      </motion.div>
 
       <DataTable
         rows={items}

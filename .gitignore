@@ -59,3 +59,6 @@ logs/
 *.p12
 *.jks
 samples/*.lic
+
+# TypeScript incremental build cache
+*.tsbuildinfo

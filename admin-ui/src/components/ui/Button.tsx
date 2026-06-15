@@ -10,17 +10,26 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   loading?: boolean;
 }
 
+/**
+ * AURORA GLASS button variants.
+ * - primary: aurora gradient + indigo glow, hover lift, gradient deepens on hover.
+ * - secondary / outline: frosted glass chip that brightens on hover.
+ * - ghost: transparent, gains a soft glass wash on hover.
+ * - danger: rose action with matching glow.
+ * Micro-interactions are CSS-only (transform/opacity, <=150ms) so they respect
+ * prefers-reduced-motion via the global net in index.css.
+ */
 const variantClasses: Record<Variant, string> = {
   primary:
-    'bg-brand-600 text-white hover:bg-brand-700 disabled:bg-brand-300 focus:ring-brand-500',
+    'bg-aurora-primary text-white shadow-glow hover:bg-aurora-primary-hover hover:shadow-glow-lg hover:-translate-y-px active:translate-y-0 disabled:bg-brand-300 disabled:bg-none disabled:shadow-none disabled:hover:translate-y-0',
   secondary:
-    'bg-slate-100 text-slate-900 hover:bg-slate-200 disabled:bg-slate-50 focus:ring-slate-400',
+    'bg-white/60 text-ink-soft backdrop-blur border border-white/70 ring-1 ring-slate-900/5 shadow-glass-sm hover:bg-white/80 hover:-translate-y-px active:translate-y-0 disabled:bg-white/40 disabled:shadow-none disabled:hover:translate-y-0',
   danger:
-    'bg-rose-600 text-white hover:bg-rose-700 disabled:bg-rose-300 focus:ring-rose-500',
+    'bg-danger-600 text-white shadow-[0_4px_14px_-4px_rgba(225,29,72,0.5)] hover:bg-danger-700 hover:shadow-[0_6px_20px_-4px_rgba(225,29,72,0.6)] hover:-translate-y-px active:translate-y-0 disabled:bg-danger-200 disabled:shadow-none disabled:hover:translate-y-0',
   ghost:
-    'bg-transparent text-slate-700 hover:bg-slate-100 focus:ring-slate-400',
+    'bg-transparent text-ink-soft hover:bg-white/60 active:bg-white/80 disabled:hover:bg-transparent',
   outline:
-    'bg-white text-slate-700 border border-slate-300 hover:bg-slate-50 focus:ring-slate-400',
+    'bg-white/60 text-ink-soft backdrop-blur border border-white/70 ring-1 ring-slate-900/5 shadow-glass-sm hover:bg-white/80 hover:-translate-y-px active:translate-y-0 disabled:bg-white/40 disabled:shadow-none disabled:hover:translate-y-0',
 };
 
 const sizeClasses: Record<Size, string> = {
@@ -37,7 +46,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     <button
       ref={ref}
       className={cn(
-        'inline-flex items-center justify-center gap-2 rounded-md font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-1 disabled:cursor-not-allowed',
+        'inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-all duration-fast ease-out-quint focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-not-allowed disabled:opacity-70',
         variantClasses[variant],
         sizeClasses[size],
         className,

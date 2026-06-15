@@ -4,12 +4,14 @@ import { useNavigate } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
+import { motion } from 'framer-motion';
 import { apiErrorMessage, plans } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Button, Dialog, Field, Input, StatusBadge } from '@/components/ui';
 import { DataTable, type Column } from '@/components/DataTable';
 import { PermissionGate } from '@/components/PermissionGate';
 import { useToast } from '@/lib/toast';
+import { fadeRise } from '@/lib/motion';
 import type { Plan } from '@/lib/types';
 
 const schema = z.object({
@@ -48,9 +50,17 @@ export function PlansListPage() {
     {
       key: 'name',
       header: 'Name',
-      render: (p) => <span className="font-medium text-slate-900">{p.name}</span>,
+      render: (p) => <span className="font-medium text-ink">{p.name}</span>,
     },
-    { key: 'code', header: 'Code', render: (p) => <code className="text-xs">{p.code}</code> },
+    {
+      key: 'code',
+      header: 'Code',
+      render: (p) => (
+        <code className="rounded bg-slate-100/70 px-1.5 py-0.5 font-mono text-xs text-ink-soft">
+          {p.code}
+        </code>
+      ),
+    },
     {
       key: 'status',
       header: 'Status',
@@ -59,9 +69,15 @@ export function PlansListPage() {
     {
       key: 'permissions',
       header: 'Permissions',
-      render: (p) => p.permissions?.length ?? 0,
+      render: (p) => <span className="tabular-nums text-ink-soft">{p.permissions?.length ?? 0}</span>,
     },
-    { key: 'features', header: 'Features', render: (p) => Object.keys(p.features ?? {}).length },
+    {
+      key: 'features',
+      header: 'Features',
+      render: (p) => (
+        <span className="tabular-nums text-ink-soft">{Object.keys(p.features ?? {}).length}</span>
+      ),
+    },
     {
       key: 'actions',
       header: '',
@@ -87,14 +103,16 @@ export function PlansListPage() {
         }
       />
 
-      <DataTable
-        rows={plansQ.data}
-        columns={columns}
-        rowKey={(p) => p.id}
-        loading={plansQ.isLoading}
-        empty={plansQ.isError ? apiErrorMessage(plansQ.error) : 'No plans defined yet.'}
-        onRowClick={(p) => navigate(`/plans/${p.id}/edit`)}
-      />
+      <motion.div variants={fadeRise} initial="hidden" animate="show">
+        <DataTable
+          rows={plansQ.data}
+          columns={columns}
+          rowKey={(p) => p.id}
+          loading={plansQ.isLoading}
+          empty={plansQ.isError ? apiErrorMessage(plansQ.error) : 'No plans defined yet.'}
+          onRowClick={(p) => navigate(`/plans/${p.id}/edit`)}
+        />
+      </motion.div>
 
       <Dialog
         open={open}

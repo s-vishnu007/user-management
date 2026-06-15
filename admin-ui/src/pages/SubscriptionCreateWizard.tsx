@@ -1,12 +1,35 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
+import { AnimatePresence, motion } from 'framer-motion';
 import { apiErrorMessage, licenses, newIdempotencyKey, orgs, plans, subscriptions } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Button, Card, CardBody, CardHeader, Field, Input, PageLoader, Select, StatusBadge } from '@/components/ui';
 import { useToast } from '@/lib/toast';
 import { triggerDownload } from '@/lib/download';
+import { DURATION, EASE } from '@/lib/motion';
+import { cn } from '@/lib/cn';
 import type { SubscriptionOverride } from '@/lib/types';
+
+/**
+ * Per-step enter/exit motion. Direction-aware so advancing slides content in
+ * from the trailing edge and stepping back slides it from the leading edge.
+ * Transform + opacity only; durations stay within the interactive band so the
+ * stepper feels fluid without ever blocking the Next/Back controls.
+ */
+const stepVariants = {
+  enter: (dir: number) => ({ opacity: 0, x: dir >= 0 ? 24 : -24 }),
+  center: {
+    opacity: 1,
+    x: 0,
+    transition: { duration: DURATION.base, ease: EASE.out },
+  },
+  exit: (dir: number) => ({
+    opacity: 0,
+    x: dir >= 0 ? -24 : 24,
+    transition: { duration: DURATION.fast, ease: EASE.in },
+  }),
+};
 
 interface WizardState {
   orgId: string;
@@ -32,7 +55,18 @@ export function SubscriptionCreateWizard() {
   const plansQ = useQuery({ queryKey: ['plans'], queryFn: plans.list });
 
   const [step, setStep] = useState(0);
+  // Presentation-only: drives the direction-aware slide between steps.
+  const [direction, setDirection] = useState(0);
   const steps = ['Organization', 'Plan', 'Dates and seats', 'Overrides', 'Confirm'];
+
+  const goNext = () => {
+    setDirection(1);
+    setStep((s) => s + 1);
+  };
+  const goBack = () => {
+    setDirection(-1);
+    setStep((s) => Math.max(0, s - 1));
+  };
 
   const [state, setState] = useState<WizardState>({
     orgId: searchParams.get('orgId') ?? '',
@@ -132,7 +166,10 @@ export function SubscriptionCreateWizard() {
         description="Provision a customer's plan, set the term, and optionally issue the first license."
         breadcrumb={
           <>
-            <Link to="/orgs" className="hover:text-brand-700">
+            <Link
+              to="/orgs"
+              className="rounded text-ink-muted transition-colors duration-fast hover:text-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
+            >
               Organizations
             </Link>{' '}
             /
@@ -140,36 +177,97 @@ export function SubscriptionCreateWizard() {
         }
       />
 
-      <div className="mb-6">
-        <ol className="flex flex-wrap gap-2 text-xs">
-          {steps.map((label, i) => (
-            <li key={label} className="flex items-center gap-2">
-              <span
-                className={
-                  'grid h-6 w-6 place-items-center rounded-full text-[11px] font-semibold ' +
-                  (i === step
-                    ? 'bg-brand-600 text-white'
-                    : i < step
-                      ? 'bg-emerald-500 text-white'
-                      : 'bg-slate-200 text-slate-600')
-                }
+      <nav aria-label="Progress" className="mb-6">
+        <ol className="glass-card flex flex-col gap-2 overflow-hidden rounded-2xl px-4 py-3 sm:flex-row sm:items-center sm:gap-0">
+          {steps.map((label, i) => {
+            const isActive = i === step;
+            const isComplete = i < step;
+            return (
+              <li
+                key={label}
+                className="flex flex-1 items-center gap-3 sm:gap-0"
+                aria-current={isActive ? 'step' : undefined}
               >
-                {i + 1}
-              </span>
-              <span className={i === step ? 'font-medium text-slate-900' : 'text-slate-500'}>
-                {label}
-              </span>
-              {i < steps.length - 1 && <span className="text-slate-300">/</span>}
-            </li>
-          ))}
+                <div className="flex items-center gap-3">
+                  <motion.span
+                    aria-hidden="true"
+                    initial={false}
+                    animate={{ scale: isActive ? 1.06 : 1 }}
+                    transition={{ type: 'spring', stiffness: 400, damping: 26, mass: 0.8 }}
+                    className={cn(
+                      'relative grid h-7 w-7 shrink-0 place-items-center rounded-full text-[11px] font-semibold tabular-nums shadow-glass-sm ring-1 transition-colors duration-base',
+                      isComplete
+                        ? 'bg-success-500 text-white ring-success-200'
+                        : isActive
+                          ? 'bg-aurora-primary text-white ring-white/60 shadow-glow'
+                          : 'bg-white/70 text-ink-faint ring-slate-900/5',
+                    )}
+                  >
+                    {isComplete ? (
+                      <svg
+                        viewBox="0 0 20 20"
+                        fill="none"
+                        className="h-3.5 w-3.5"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="m5 10.5 3 3 7-7"
+                          stroke="currentColor"
+                          strokeWidth="2.2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    ) : (
+                      i + 1
+                    )}
+                  </motion.span>
+                  <span
+                    className={cn(
+                      'text-xs font-medium transition-colors duration-base sm:whitespace-nowrap',
+                      isActive
+                        ? 'text-ink'
+                        : isComplete
+                          ? 'text-ink-soft'
+                          : 'text-ink-faint',
+                    )}
+                  >
+                    {label}
+                  </span>
+                </div>
+                {i < steps.length - 1 && (
+                  <div
+                    aria-hidden="true"
+                    className="ml-3 hidden h-px flex-1 overflow-hidden rounded-full bg-slate-900/10 sm:block"
+                  >
+                    <motion.div
+                      className="h-full origin-left rounded-full bg-aurora-primary"
+                      initial={false}
+                      animate={{ scaleX: isComplete ? 1 : 0 }}
+                      transition={{ duration: DURATION.moderate, ease: EASE.out }}
+                    />
+                  </div>
+                )}
+              </li>
+            );
+          })}
         </ol>
-      </div>
+      </nav>
 
       <Card>
-        <CardBody>
+        <CardBody className="overflow-hidden">
+          <AnimatePresence mode="wait" initial={false} custom={direction}>
+            <motion.div
+              key={step}
+              custom={direction}
+              variants={stepVariants}
+              initial="enter"
+              animate="center"
+              exit="exit"
+            >
           {step === 0 && (
             <div className="max-w-md">
-              <h3 className="mb-3 text-sm font-medium text-slate-900">Choose an organization</h3>
+              <h3 className="mb-3 text-sm font-semibold text-ink">Choose an organization</h3>
               {orgsQ.isLoading ? (
                 <PageLoader />
               ) : (
@@ -193,7 +291,7 @@ export function SubscriptionCreateWizard() {
 
           {step === 1 && (
             <div className="max-w-2xl">
-              <h3 className="mb-3 text-sm font-medium text-slate-900">Choose a plan</h3>
+              <h3 className="mb-3 text-sm font-semibold text-ink">Choose a plan</h3>
               {plansQ.isLoading ? (
                 <PageLoader />
               ) : (
@@ -204,25 +302,44 @@ export function SubscriptionCreateWizard() {
                       <button
                         key={p.id}
                         type="button"
+                        aria-pressed={selected}
                         onClick={() => setState((s) => ({ ...s, planId: p.id }))}
-                        className={
-                          'rounded-md border p-4 text-left transition-colors ' +
-                          (selected
-                            ? 'border-brand-500 bg-brand-50 ring-1 ring-brand-300'
-                            : 'border-slate-200 hover:bg-slate-50')
-                        }
+                        className={cn(
+                          'group relative rounded-xl border p-4 text-left shadow-glass-sm transition-all duration-fast ease-out-quint',
+                          'focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white',
+                          'hover:-translate-y-0.5 hover:shadow-glass',
+                          selected
+                            ? 'border-indigo-300 bg-gradient-to-br from-indigo-50/90 to-violet-50/80 ring-1 ring-indigo-300'
+                            : 'border-white/60 bg-white/70 backdrop-blur-glass hover:bg-white/85',
+                        )}
                       >
-                        <div className="flex items-center justify-between">
-                          <div className="font-medium text-slate-900">{p.name}</div>
+                        {selected && (
+                          <span
+                            aria-hidden="true"
+                            className="absolute right-3 top-3 grid h-5 w-5 place-items-center rounded-full bg-aurora-primary text-white shadow-glow"
+                          >
+                            <svg viewBox="0 0 20 20" fill="none" className="h-3 w-3">
+                              <path
+                                d="m5 10.5 3 3 7-7"
+                                stroke="currentColor"
+                                strokeWidth="2.4"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                          </span>
+                        )}
+                        <div className="flex items-center justify-between gap-2 pr-7">
+                          <div className="font-semibold text-ink">{p.name}</div>
                           <StatusBadge status={p.active === false ? 'RETIRED' : 'ACTIVE'} />
                         </div>
-                        <div className="mt-1 text-xs text-slate-500">
-                          <code>{p.code}</code>
+                        <div className="mt-1 text-xs text-ink-muted">
+                          <code className="font-mono">{p.code}</code>
                         </div>
                         {p.description ? (
-                          <p className="mt-2 text-sm text-slate-600">{p.description}</p>
+                          <p className="mt-2 text-sm text-ink-soft">{p.description}</p>
                         ) : null}
-                        <div className="mt-3 text-xs text-slate-500">
+                        <div className="mt-3 text-xs text-ink-muted">
                           {p.permissions?.length ?? 0} permissions ·{' '}
                           {Object.keys(p.features ?? {}).length} features
                         </div>
@@ -269,13 +386,13 @@ export function SubscriptionCreateWizard() {
           {step === 3 && (
             <div>
               <div className="mb-3 flex items-center justify-between">
-                <h3 className="text-sm font-medium text-slate-900">Overrides (optional)</h3>
+                <h3 className="text-sm font-semibold text-ink">Overrides (optional)</h3>
                 <Button size="sm" variant="outline" onClick={addOverride}>
                   Add override
                 </Button>
               </div>
               {state.overrides.length === 0 ? (
-                <div className="rounded-md border border-dashed border-slate-200 p-4 text-sm text-slate-500">
+                <div className="rounded-xl border border-dashed border-slate-300/80 bg-white/40 p-5 text-sm text-ink-muted">
                   Plan entitlements will be used as-is. Add overrides for per-customer terms.
                 </div>
               ) : (
@@ -283,7 +400,7 @@ export function SubscriptionCreateWizard() {
                   {state.overrides.map((o, i) => (
                     <div
                       key={i}
-                      className="grid grid-cols-1 items-end gap-2 rounded-md border border-slate-200 p-3 md:grid-cols-12"
+                      className="grid grid-cols-1 items-end gap-2 rounded-xl border border-white/60 bg-white/60 p-3 shadow-glass-sm backdrop-blur-glass md:grid-cols-12"
                     >
                       <div className="md:col-span-3">
                         <Field label="Type" htmlFor={`o-type-${i}`}>
@@ -336,39 +453,49 @@ export function SubscriptionCreateWizard() {
 
           {step === 4 && (
             <div>
-              <h3 className="mb-3 text-sm font-medium text-slate-900">Confirm</h3>
+              <h3 className="mb-3 text-sm font-semibold text-ink">Confirm</h3>
               <Card>
                 <CardHeader title="Summary" />
                 <CardBody>
-                  <dl className="grid grid-cols-1 gap-y-3 text-sm sm:grid-cols-2">
+                  <dl className="grid grid-cols-1 gap-y-4 text-sm sm:grid-cols-2">
                     <div>
-                      <dt className="text-xs text-slate-500">Organization</dt>
-                      <dd className="font-medium">{selectedOrg?.name ?? state.orgId}</dd>
+                      <dt className="text-xs font-medium uppercase tracking-wide text-ink-faint">
+                        Organization
+                      </dt>
+                      <dd className="mt-0.5 font-medium text-ink">{selectedOrg?.name ?? state.orgId}</dd>
                     </div>
                     <div>
-                      <dt className="text-xs text-slate-500">Plan</dt>
-                      <dd className="font-medium">{selectedPlan?.name ?? state.planId}</dd>
+                      <dt className="text-xs font-medium uppercase tracking-wide text-ink-faint">
+                        Plan
+                      </dt>
+                      <dd className="mt-0.5 font-medium text-ink">{selectedPlan?.name ?? state.planId}</dd>
                     </div>
                     <div>
-                      <dt className="text-xs text-slate-500">Term</dt>
-                      <dd>
+                      <dt className="text-xs font-medium uppercase tracking-wide text-ink-faint">
+                        Term
+                      </dt>
+                      <dd className="mt-0.5 text-ink-soft tabular-nums">
                         {state.startsAt} → {state.endsAt}
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-xs text-slate-500">Seats</dt>
-                      <dd>{state.seats}</dd>
+                      <dt className="text-xs font-medium uppercase tracking-wide text-ink-faint">
+                        Seats
+                      </dt>
+                      <dd className="mt-0.5 text-ink-soft tabular-nums">{state.seats}</dd>
                     </div>
                     <div className="sm:col-span-2">
-                      <dt className="text-xs text-slate-500">Overrides</dt>
-                      <dd>
+                      <dt className="text-xs font-medium uppercase tracking-wide text-ink-faint">
+                        Overrides
+                      </dt>
+                      <dd className="mt-0.5 text-ink-soft">
                         {state.overrides.length === 0 ? (
-                          <span className="text-slate-500">None</span>
+                          <span className="text-ink-muted">None</span>
                         ) : (
                           <ul className="list-inside list-disc">
                             {state.overrides.map((o, i) => (
                               <li key={i}>
-                                <code className="text-xs">{o.type}</code> · {o.key}
+                                <code className="font-mono text-xs">{o.type}</code> · {o.key}
                                 {o.value !== undefined ? ` = ${String(o.value)}` : ''}
                               </li>
                             ))}
@@ -381,20 +508,22 @@ export function SubscriptionCreateWizard() {
               </Card>
             </div>
           )}
+            </motion.div>
+          </AnimatePresence>
         </CardBody>
       </Card>
 
       <div className="mt-6 flex items-center justify-between">
         <Button
           variant="outline"
-          onClick={() => setStep((s) => Math.max(0, s - 1))}
+          onClick={goBack}
           disabled={step === 0 || submitting}
         >
           Back
         </Button>
         <div className="flex gap-2">
           {step < steps.length - 1 ? (
-            <Button onClick={() => setStep((s) => s + 1)} disabled={!canNext}>
+            <Button onClick={goNext} disabled={!canNext}>
               Next
             </Button>
           ) : (

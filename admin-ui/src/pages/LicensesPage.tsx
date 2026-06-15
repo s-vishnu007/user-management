@@ -3,7 +3,7 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { apiErrorMessage, licenses, orgs, subscriptions } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
-import { Button, Input, Select, StatusBadge } from '@/components/ui';
+import { Button, Card, CardBody, Field, Input, Select, StatusBadge } from '@/components/ui';
 import { DataTable, type Column } from '@/components/DataTable';
 import { PermissionGate } from '@/components/PermissionGate';
 import { useToast } from '@/lib/toast';
@@ -83,9 +83,15 @@ export function LicensesPage() {
     {
       key: 'jti',
       header: 'JTI',
-      render: (l) => <code className="text-xs">{l.jti.slice(0, 18)}…</code>,
+      render: (l) => (
+        <code className="font-mono text-xs text-ink-soft">{l.jti.slice(0, 18)}…</code>
+      ),
     },
-    { key: 'kid', header: 'Key', render: (l) => <code className="text-xs">{l.kid}</code> },
+    {
+      key: 'kid',
+      header: 'Key',
+      render: (l) => <code className="font-mono text-xs text-ink-muted">{l.kid}</code>,
+    },
     {
       key: 'status',
       header: 'Status',
@@ -101,12 +107,20 @@ export function LicensesPage() {
     {
       key: 'issued',
       header: 'Issued',
-      render: (l) => new Date(l.issuedAt).toLocaleDateString(),
+      render: (l) => (
+        <span className="tabular-nums text-ink-soft">
+          {new Date(l.issuedAt).toLocaleDateString()}
+        </span>
+      ),
     },
     {
       key: 'expires',
       header: 'Expires',
-      render: (l) => new Date(l.expiresAt).toLocaleDateString(),
+      render: (l) => (
+        <span className="tabular-nums text-ink-soft">
+          {new Date(l.expiresAt).toLocaleDateString()}
+        </span>
+      ),
     },
     {
       key: 'sub',
@@ -130,6 +144,7 @@ export function LicensesPage() {
               <Button
                 variant="ghost"
                 size="sm"
+                className="text-danger-600 hover:bg-danger-50/70 hover:text-danger-700"
                 onClick={() => {
                   const reason = prompt('Reason for revocation? (optional)') ?? undefined;
                   revokeMut.mutate({ jti: l.jti, reason: reason || undefined });
@@ -158,18 +173,16 @@ export function LicensesPage() {
         title="Licenses"
         description="Issued license tokens, scoped to a subscription."
       />
-      <DataTable
-        rows={subId ? data : []}
-        columns={columns}
-        rowKey={(l) => l.jti}
-        loading={!!subId && licsQ.isLoading}
-        empty={emptyMessage}
-        toolbar={
-          <div className="flex w-full flex-wrap items-center gap-2">
+
+      {/* Scope picker — the org→subscription drill-down promoted into its own
+          glass panel so the workspace reads as a deliberate two-step flow. */}
+      <Card className="mb-6 motion-safe:animate-fade-up">
+        <CardBody className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <Field label="Organization" htmlFor="lic-org">
             <Select
+              id="lic-org"
               value={orgId}
               onChange={(e) => setOrgId(e.target.value)}
-              className="max-w-xs"
               disabled={orgsQ.isLoading}
             >
               <option value="">Select organization…</option>
@@ -179,10 +192,16 @@ export function LicensesPage() {
                 </option>
               ))}
             </Select>
+          </Field>
+          <Field
+            label="Subscription"
+            htmlFor="lic-sub"
+            hint={orgId ? undefined : 'Pick an organization first'}
+          >
             <Select
+              id="lic-sub"
               value={subId}
               onChange={(e) => setSubId(e.target.value)}
-              className="max-w-xs"
               disabled={!orgId || subsQ.isLoading}
             >
               <option value="">Select subscription…</option>
@@ -192,6 +211,18 @@ export function LicensesPage() {
                 </option>
               ))}
             </Select>
+          </Field>
+        </CardBody>
+      </Card>
+
+      <DataTable
+        rows={subId ? data : []}
+        columns={columns}
+        rowKey={(l) => l.jti}
+        loading={!!subId && licsQ.isLoading}
+        empty={emptyMessage}
+        toolbar={
+          <div className="flex w-full flex-wrap items-center gap-2">
             <Input
               placeholder="Search by JTI or key"
               value={filter}

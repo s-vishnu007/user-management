@@ -1,7 +1,6 @@
 import { type ReactNode, useMemo, useState } from 'react';
 import { Table, THead, TBody, TR, TH, TD, EmptyState } from './ui/Table';
 import { Button } from './ui/Button';
-import { Spinner } from './ui/Spinner';
 
 export interface Column<T> {
   key: string;
@@ -41,9 +40,9 @@ export function DataTable<T>({
   );
 
   return (
-    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+    <div className="glass-solid overflow-hidden rounded-xl ring-1 ring-slate-900/5 shadow-glass">
       {toolbar ? (
-        <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
+        <div className="flex items-center justify-between gap-3 border-b border-slate-900/5 px-4 py-3">
           {toolbar}
         </div>
       ) : null}
@@ -59,11 +58,16 @@ export function DataTable<T>({
         </THead>
         <TBody>
           {loading ? (
-            <tr>
-              <td colSpan={columns.length} className="py-10 text-center">
-                <Spinner size={6} />
-              </td>
-            </tr>
+            // Skeleton rows sized to the real layout — preserves the loading branch.
+            Array.from({ length: 5 }).map((_, r) => (
+              <tr key={`sk-${r}`}>
+                {columns.map((c) => (
+                  <TD key={c.key} className={c.className}>
+                    <span className="skeleton block h-4 w-[70%]" />
+                  </TD>
+                ))}
+              </tr>
+            ))
           ) : slice.length === 0 ? (
             <tr>
               <td colSpan={columns.length}>
@@ -74,8 +78,28 @@ export function DataTable<T>({
             slice.map((row) => (
               <TR
                 key={rowKey(row)}
-                className={onRowClick ? 'cursor-pointer' : undefined}
+                // When the whole row is the action, expose it to keyboard + AT:
+                // focusable, button semantics, Enter/Space activation, and a
+                // visible focus style. Purely additive — onRowClick is unchanged.
+                className={
+                  onRowClick
+                    ? 'cursor-pointer focus:outline-none focus-visible:bg-indigo-50/70 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500'
+                    : undefined
+                }
                 onClick={onRowClick ? () => onRowClick(row) : undefined}
+                role={onRowClick ? 'button' : undefined}
+                tabIndex={onRowClick ? 0 : undefined}
+                aria-label={onRowClick ? 'Open row' : undefined}
+                onKeyDown={
+                  onRowClick
+                    ? (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          onRowClick(row);
+                        }
+                      }
+                    : undefined
+                }
               >
                 {columns.map((c) => (
                   <TD key={c.key} className={c.className}>
@@ -88,8 +112,8 @@ export function DataTable<T>({
         </TBody>
       </Table>
       {data.length > pageSize ? (
-        <div className="flex items-center justify-between border-t border-slate-100 px-4 py-3 text-xs text-slate-500">
-          <span>
+        <div className="flex items-center justify-between border-t border-slate-900/5 px-4 py-3 text-xs text-ink-muted">
+          <span className="tabular-nums">
             Page {page} of {totalPages} · {data.length} total
           </span>
           <div className="flex gap-2">

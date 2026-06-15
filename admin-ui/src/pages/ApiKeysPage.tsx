@@ -67,12 +67,16 @@ export function ApiKeysPage() {
     {
       key: 'name',
       header: 'Name',
-      render: (k) => <span className="font-medium text-slate-900">{k.name}</span>,
+      render: (k) => <span className="font-medium text-ink">{k.name}</span>,
     },
     {
       key: 'prefix',
       header: 'Prefix',
-      render: (k) => <code className="text-xs">{k.prefix}…</code>,
+      render: (k) => (
+        <code className="rounded-md bg-slate-100/80 px-1.5 py-0.5 font-mono text-xs text-ink-soft ring-1 ring-inset ring-slate-900/5">
+          {k.prefix}…
+        </code>
+      ),
     },
     {
       key: 'scopes',
@@ -80,7 +84,7 @@ export function ApiKeysPage() {
       render: (k) => (
         <div className="flex flex-wrap gap-1">
           {k.scopes.map((s) => (
-            <Badge key={s} tone="info">
+            <Badge key={s} tone="info" className="font-mono">
               {s}
             </Badge>
           ))}
@@ -90,18 +94,34 @@ export function ApiKeysPage() {
     {
       key: 'created',
       header: 'Created',
-      render: (k) => new Date(k.createdAt).toLocaleDateString(),
+      render: (k) => (
+        <span className="tabular-nums text-ink-muted">{new Date(k.createdAt).toLocaleDateString()}</span>
+      ),
     },
     {
       key: 'lastUsed',
       header: 'Last used',
-      render: (k) => (k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : '—'),
+      render: (k) => (
+        <span className="tabular-nums text-ink-muted">
+          {k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : '—'}
+        </span>
+      ),
     },
     {
       key: 'status',
       header: 'Status',
       render: (k) =>
-        k.revokedAt ? <Badge tone="danger">Revoked</Badge> : <Badge tone="success">Active</Badge>,
+        k.revokedAt ? (
+          <Badge tone="danger">
+            <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-danger-500" />
+            Revoked
+          </Badge>
+        ) : (
+          <Badge tone="success">
+            <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-success-500" />
+            Active
+          </Badge>
+        ),
     },
     {
       key: 'actions',
@@ -129,7 +149,10 @@ export function ApiKeysPage() {
         title="API keys"
         description="Programmatic access to the control plane API for CI pipelines and integrations."
         breadcrumb={
-          <Link to={`/orgs/${orgId}`} className="hover:text-brand-700">
+          <Link
+            to={`/orgs/${orgId}`}
+            className="rounded transition-colors hover:text-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
+          >
             Organization
           </Link>
         }
@@ -190,15 +213,39 @@ export function ApiKeysPage() {
         }
       >
         {createdKey && (
-          <div className="space-y-3">
-            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-              Store this in a secret manager. We cannot recover it.
+          <div className="space-y-4">
+            <div
+              role="alert"
+              className="flex items-start gap-3 rounded-xl border border-warn-200 bg-warn-50/80 px-3.5 py-3 text-sm text-warn-700"
+            >
+              <span
+                aria-hidden
+                className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-warn-100 text-warn-700"
+              >
+                <svg viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                  <path
+                    fillRule="evenodd"
+                    d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 8a1 1 0 100-2 1 1 0 000 2z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+              </span>
+              <span>
+                <span className="font-semibold">Store this in a secret manager.</span> We cannot
+                recover it — this is the only time it will be shown.
+              </span>
             </div>
-            <pre className="overflow-auto rounded-md border border-slate-200 bg-slate-50 p-3 text-xs">
-              {createdKey.plaintext ?? `${createdKey.prefix}...`}
-            </pre>
+
+            <div className="rounded-xl border border-white/70 bg-white/85 p-3 shadow-glass-inset ring-1 ring-slate-900/5">
+              <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-ink-faint">
+                Secret key
+              </div>
+              <pre className="overflow-auto whitespace-pre-wrap break-all rounded-lg bg-slate-50/90 p-3 font-mono text-xs leading-relaxed text-ink ring-1 ring-inset ring-slate-900/5">
+                {createdKey.plaintext ?? `${createdKey.prefix}...`}
+              </pre>
+            </div>
+
             <Button
-              variant="outline"
               onClick={() => {
                 if (createdKey.plaintext) {
                   navigator.clipboard.writeText(createdKey.plaintext).then(
@@ -208,7 +255,11 @@ export function ApiKeysPage() {
                 }
               }}
             >
-              Copy
+              <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden className="h-4 w-4">
+                <path d="M7 3a2 2 0 00-2 2v8a2 2 0 002 2h6a2 2 0 002-2V7.414A2 2 0 0014.414 6L12 3.586A2 2 0 0010.586 3H7z" />
+                <path d="M3 7a2 2 0 012-2v9a2 2 0 002 2h6a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+              </svg>
+              Copy key
             </Button>
           </div>
         )}

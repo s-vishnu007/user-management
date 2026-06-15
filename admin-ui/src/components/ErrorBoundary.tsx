@@ -36,31 +36,45 @@ export class ErrorBoundary extends Component<Props, State> {
     if (error) {
       if (this.props.fallback) return this.props.fallback(error, this.reset);
       return (
-        <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
-          <div className="w-full max-w-md rounded-lg border border-slate-200 bg-white p-6 text-center shadow-sm">
-            <div className="mx-auto mb-3 grid h-10 w-10 place-items-center rounded-full bg-rose-100 text-rose-600">
-              !
+        <div className="flex min-h-screen items-center justify-center px-4">
+          <div className="glass-card w-full max-w-md p-7 text-center shadow-glass-xl motion-safe:animate-scale-in">
+            <div className="mx-auto mb-4 grid h-12 w-12 place-items-center rounded-full bg-danger-100 text-danger-600 ring-1 ring-danger-200">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                className="h-6 w-6"
+                aria-hidden="true"
+              >
+                <path d="M12 9v4" strokeLinecap="round" />
+                <path d="M12 17h.01" strokeLinecap="round" />
+                <path
+                  d="M10.3 3.9 2.4 17.5A2 2 0 0 0 4.1 20.5h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"
+                  strokeLinejoin="round"
+                />
+              </svg>
             </div>
-            <h1 className="text-lg font-semibold text-slate-900">Something went wrong</h1>
-            <p className="mt-1 text-sm text-slate-500">
+            <h1 className="font-display text-lg font-semibold text-ink">Something went wrong</h1>
+            <p className="mt-1.5 text-sm text-ink-muted">
               The page hit an unexpected error. Try again, or reload the app.
             </p>
             {error.message ? (
-              <pre className="mt-3 overflow-auto rounded-md border border-slate-200 bg-slate-50 p-2 text-left text-xs text-slate-600">
+              <pre className="mt-4 overflow-auto rounded-lg border border-slate-200/80 bg-slate-50/80 p-3 text-left font-mono text-xs text-ink-soft">
                 {error.message}
               </pre>
             ) : null}
-            <div className="mt-4 flex justify-center gap-2">
+            <div className="mt-5 flex justify-center gap-2">
               <button
                 type="button"
-                className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                className="rounded-lg border border-white/70 bg-white/60 px-4 py-2 text-sm font-medium text-ink-soft shadow-glass-sm ring-1 ring-slate-900/5 transition-all duration-fast hover:bg-white/80 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
                 onClick={this.reset}
               >
                 Try again
               </button>
               <button
                 type="button"
-                className="rounded-md bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
+                className="rounded-lg bg-aurora-primary px-4 py-2 text-sm font-medium text-white shadow-glow transition-all duration-fast hover:bg-aurora-primary-hover hover:shadow-glow-lg hover:-translate-y-px active:translate-y-0 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
                 onClick={() => window.location.assign('/')}
               >
                 Reload app

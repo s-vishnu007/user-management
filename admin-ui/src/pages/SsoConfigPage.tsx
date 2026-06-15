@@ -4,9 +4,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
+import { motion } from 'framer-motion';
 import { apiErrorMessage, sso } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import {
+  Badge,
   Button,
   Card,
   CardBody,
@@ -18,6 +20,7 @@ import {
   Textarea,
 } from '@/components/ui';
 import { useToast } from '@/lib/toast';
+import { fadeRise, staggerContainer } from '@/lib/motion';
 import type { SsoProviderConfig, SsoProviderView, SsoType } from '@/lib/types';
 
 const schema = z.object({
@@ -57,6 +60,11 @@ function configToForm(p: SsoProviderView | undefined): Values {
     allowedEmailDomains: (c.allowedEmailDomains as string) ?? '',
   };
 }
+
+const PROTOCOL_META: Record<SsoType, { label: string; blurb: string }> = {
+  SAML: { label: 'SAML 2.0', blurb: 'XML assertions via IdP metadata' },
+  OIDC: { label: 'OIDC', blurb: 'OpenID Connect discovery + client credentials' },
+};
 
 export function SsoConfigPage() {
   const { orgId = '' } = useParams<{ orgId: string }>();
@@ -126,139 +134,233 @@ export function SsoConfigPage() {
 
   if (providersQ.isLoading) return <PageLoader />;
 
+  const configured = !!current;
+
   return (
     <div>
       <PageHeader
         title="Single sign-on"
         description="Configure SAML 2.0 or OIDC for this organization. JIT provisioning supported."
         breadcrumb={
-          <Link to={`/orgs/${orgId}`} className="hover:text-brand-700">
+          <Link to={`/orgs/${orgId}`} className="hover:text-indigo-700">
             Organization
           </Link>
         }
       />
 
-      <Card>
-        <CardHeader title="Identity provider" />
-        <CardBody>
-          <form onSubmit={form.handleSubmit((v) => saveMut.mutate(v))} className="space-y-4">
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              <Field label="Protocol" htmlFor="protocol">
-                <Select
-                  id="protocol"
-                  value={protocol}
-                  onChange={(e) => setProtocol(e.target.value as SsoType)}
-                >
-                  <option value="SAML">SAML 2.0</option>
-                  <option value="OIDC">OIDC</option>
-                </Select>
-              </Field>
-              <Field label="Enabled" htmlFor="enabled">
-                <div className="flex items-center gap-2 pt-2">
-                  <input
-                    id="enabled"
-                    type="checkbox"
-                    className="accent-brand-600"
-                    {...form.register('enabled')}
-                  />
-                  <span className="text-sm text-slate-600">Allow users to sign in via SSO</span>
-                </div>
-              </Field>
-            </div>
-
-            {protocol === 'SAML' ? (
-              <>
-                <Field
-                  label="IdP metadata URL"
-                  htmlFor="metadataUrl"
-                  hint="Or paste XML below"
-                  error={form.formState.errors.metadataUrl?.message}
-                >
-                  <Input
-                    id="metadataUrl"
-                    placeholder="https://idp.example.com/metadata"
-                    {...form.register('metadataUrl')}
-                  />
-                </Field>
-                <Field label="IdP metadata XML" htmlFor="metadataXml">
-                  <Textarea
-                    id="metadataXml"
-                    rows={8}
-                    placeholder="<EntityDescriptor ..."
-                    {...form.register('metadataXml')}
-                  />
-                </Field>
-              </>
-            ) : (
-              <>
-                <Field label="Issuer" htmlFor="issuer">
-                  <Input
-                    id="issuer"
-                    placeholder="https://idp.example.com"
-                    {...form.register('issuer')}
-                  />
-                </Field>
-                <Field
-                  label="Discovery URL"
-                  htmlFor="discoveryUrl"
-                  error={form.formState.errors.discoveryUrl?.message}
-                >
-                  <Input
-                    id="discoveryUrl"
-                    placeholder="https://idp.example.com/.well-known/openid-configuration"
-                    {...form.register('discoveryUrl')}
-                  />
-                </Field>
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                  <Field label="Client ID" htmlFor="clientId">
-                    <Input id="clientId" {...form.register('clientId')} />
-                  </Field>
-                  <Field
-                    label="Client secret"
-                    htmlFor="clientSecret"
-                    hint={current ? 'Leave blank to keep current' : undefined}
+      <motion.div
+        variants={staggerContainer}
+        initial="hidden"
+        animate="show"
+        className="grid grid-cols-1 gap-5 lg:grid-cols-[18rem_minmax(0,1fr)]"
+      >
+        {/* Protocol picker — one provider per protocol; selection drives the form below. */}
+        <motion.div variants={fadeRise} className="lg:sticky lg:top-20 lg:self-start">
+          <Card>
+            <CardHeader title="Protocols" description="One provider per protocol." />
+            <CardBody className="space-y-2">
+              {(['SAML', 'OIDC'] as const).map((p) => {
+                const selected = protocol === p;
+                const existing = (providersQ.data ?? []).find((x) => x.type === p);
+                return (
+                  <button
+                    key={p}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => setProtocol(p)}
+                    className={
+                      selected
+                        ? 'group flex w-full items-start gap-3 rounded-xl border border-indigo-200/70 bg-gradient-to-r from-indigo-50 to-violet-50 px-3 py-3 text-left ring-1 ring-indigo-500/10 transition-all duration-fast'
+                        : 'group flex w-full items-start gap-3 rounded-xl border border-white/60 bg-white/50 px-3 py-3 text-left transition-all duration-fast hover:-translate-y-px hover:bg-white/80 hover:shadow-glass-sm'
+                    }
                   >
-                    <Input
-                      id="clientSecret"
-                      type="password"
-                      autoComplete="new-password"
-                      placeholder={current ? '••••••••' : ''}
-                      {...form.register('clientSecret')}
-                    />
+                    <span
+                      className={
+                        selected
+                          ? 'mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-aurora-primary text-xs font-semibold text-white shadow-glow'
+                          : 'mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-aurora-chip text-xs font-semibold text-indigo-600'
+                      }
+                      aria-hidden="true"
+                    >
+                      {p === 'SAML' ? 'S' : 'O'}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center justify-between gap-2">
+                        <span
+                          className={
+                            selected
+                              ? 'text-sm font-semibold text-indigo-800'
+                              : 'text-sm font-semibold text-ink'
+                          }
+                        >
+                          {PROTOCOL_META[p].label}
+                        </span>
+                        {existing ? (
+                          <Badge tone={existing.enabled ? 'success' : 'neutral'}>
+                            {existing.enabled ? 'Enabled' : 'Configured'}
+                          </Badge>
+                        ) : (
+                          <Badge tone="neutral">Not set</Badge>
+                        )}
+                      </span>
+                      <span className="mt-0.5 block text-xs text-ink-muted">
+                        {PROTOCOL_META[p].blurb}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+            </CardBody>
+          </Card>
+        </motion.div>
+
+        <motion.div variants={fadeRise}>
+          <Card>
+            <CardHeader
+              title="Identity provider"
+              description={`${PROTOCOL_META[protocol].label} settings for this organization.`}
+              actions={
+                configured ? (
+                  <Badge tone={current?.enabled ? 'success' : 'neutral'}>
+                    {current?.enabled ? 'SSO enabled' : 'Saved, disabled'}
+                  </Badge>
+                ) : (
+                  <Badge tone="info">New provider</Badge>
+                )
+              }
+            />
+            <CardBody>
+              <form onSubmit={form.handleSubmit((v) => saveMut.mutate(v))} className="space-y-5">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <Field label="Protocol" htmlFor="protocol">
+                    <Select
+                      id="protocol"
+                      value={protocol}
+                      onChange={(e) => setProtocol(e.target.value as SsoType)}
+                    >
+                      <option value="SAML">SAML 2.0</option>
+                      <option value="OIDC">OIDC</option>
+                    </Select>
+                  </Field>
+                  <Field label="Enabled" htmlFor="enabled">
+                    <label
+                      htmlFor="enabled"
+                      className="mt-0.5 flex cursor-pointer items-center gap-2.5 rounded-lg border border-slate-200/80 bg-white/70 px-3 py-2 shadow-glass-sm transition-colors duration-fast hover:bg-white"
+                    >
+                      <input
+                        id="enabled"
+                        type="checkbox"
+                        className="h-4 w-4 accent-indigo-600"
+                        {...form.register('enabled')}
+                      />
+                      <span className="text-sm text-ink-soft">Allow users to sign in via SSO</span>
+                    </label>
                   </Field>
                 </div>
-              </>
-            )}
 
-            <Field
-              label="Allowed email domains (comma-separated)"
-              htmlFor="allowedEmailDomains"
-              hint="Required for JIT provisioning; blank denies JIT"
-            >
-              <Input
-                id="allowedEmailDomains"
-                placeholder="example.com, corp.example.com"
-                {...form.register('allowedEmailDomains')}
-              />
-            </Field>
+                {protocol === 'SAML' ? (
+                  <>
+                    <Field
+                      label="IdP metadata URL"
+                      htmlFor="metadataUrl"
+                      hint="Or paste XML below"
+                      error={form.formState.errors.metadataUrl?.message}
+                    >
+                      <Input
+                        id="metadataUrl"
+                        invalid={!!form.formState.errors.metadataUrl}
+                        placeholder="https://idp.example.com/metadata"
+                        {...form.register('metadataUrl')}
+                      />
+                    </Field>
+                    <Field label="IdP metadata XML" htmlFor="metadataXml">
+                      <Textarea
+                        id="metadataXml"
+                        rows={8}
+                        className="font-mono text-xs"
+                        placeholder="<EntityDescriptor ..."
+                        {...form.register('metadataXml')}
+                      />
+                    </Field>
+                  </>
+                ) : (
+                  <>
+                    <Field label="Issuer" htmlFor="issuer">
+                      <Input
+                        id="issuer"
+                        placeholder="https://idp.example.com"
+                        {...form.register('issuer')}
+                      />
+                    </Field>
+                    <Field
+                      label="Discovery URL"
+                      htmlFor="discoveryUrl"
+                      error={form.formState.errors.discoveryUrl?.message}
+                    >
+                      <Input
+                        id="discoveryUrl"
+                        invalid={!!form.formState.errors.discoveryUrl}
+                        placeholder="https://idp.example.com/.well-known/openid-configuration"
+                        {...form.register('discoveryUrl')}
+                      />
+                    </Field>
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                      <Field label="Client ID" htmlFor="clientId">
+                        <Input id="clientId" {...form.register('clientId')} />
+                      </Field>
+                      <Field
+                        label="Client secret"
+                        htmlFor="clientSecret"
+                        hint={current ? 'Leave blank to keep current' : undefined}
+                      >
+                        <Input
+                          id="clientSecret"
+                          type="password"
+                          autoComplete="new-password"
+                          placeholder={current ? '••••••••' : ''}
+                          {...form.register('clientSecret')}
+                        />
+                      </Field>
+                    </div>
+                  </>
+                )}
 
-            <div className="flex items-center gap-2">
-              <Button type="submit" loading={saveMut.isPending}>
-                Save configuration
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                disabled={!current}
-                loading={testMut.isPending}
-                onClick={() => testMut.mutate()}
-              >
-                Test connection
-              </Button>
-            </div>
-          </form>
-        </CardBody>
-      </Card>
+                <Field
+                  label="Allowed email domains (comma-separated)"
+                  htmlFor="allowedEmailDomains"
+                  hint="Required for JIT provisioning; blank denies JIT"
+                >
+                  <Input
+                    id="allowedEmailDomains"
+                    placeholder="example.com, corp.example.com"
+                    {...form.register('allowedEmailDomains')}
+                  />
+                </Field>
+
+                <div className="flex flex-wrap items-center gap-2 border-t border-slate-900/5 pt-5">
+                  <Button type="submit" loading={saveMut.isPending}>
+                    Save configuration
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={!current}
+                    loading={testMut.isPending}
+                    onClick={() => testMut.mutate()}
+                  >
+                    Test connection
+                  </Button>
+                  {!current ? (
+                    <span className="text-xs text-ink-faint">
+                      Save this provider before you can test the connection.
+                    </span>
+                  ) : null}
+                </div>
+              </form>
+            </CardBody>
+          </Card>
+        </motion.div>
+      </motion.div>
     </div>
   );
 }
