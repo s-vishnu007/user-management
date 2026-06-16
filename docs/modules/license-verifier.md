@@ -251,7 +251,7 @@ A small Jackson `record` describing the **optional human-friendly JSON wrapper**
 {
   "license": "<compact-JWS>",
   "issued_at": "2026-06-01T10:00:00Z",
-  "customer": "Acme Corp",
+  "customer": "Example Corp",
   "plan": "Pro",
   "expires_at": "2027-06-01T10:00:00Z",
   "notes": "Drop this file at /etc/app/license.lic."

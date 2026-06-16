@@ -48,6 +48,9 @@ public class RateLimitFilter extends OncePerRequestFilter {
     private static final Set<String> PROTECTED_PATHS = Set.of(
             "/api/v1/auth/login",
             "/api/v1/auth/mfa/login",
+            "/api/v1/auth/register",
+            "/api/v1/auth/verify-email",
+            "/api/v1/auth/verify-email/resend",
             "/api/v1/auth/password-reset/request",
             "/api/v1/auth/password-reset/confirm");
 
@@ -103,6 +106,9 @@ public class RateLimitFilter extends OncePerRequestFilter {
         if (key == null || key.isBlank()) {
             key = request.getRemoteAddr();
         }
+        // Separate token buckets per endpoint-CLASS (login vs signup vs reset) so a burst on one class
+        // from a shared-NAT/proxy IP cannot starve another class for co-located users (re-audit #9).
+        key = key + '|' + bucketGroup(requestPath(request));
         Bucket bucket;
         synchronized (buckets) {
             bucket = buckets.computeIfAbsent(key, k -> newBucket());
@@ -112,6 +118,26 @@ public class RateLimitFilter extends OncePerRequestFilter {
             return;
         }
         writeTooManyRequests(response);
+    }
+
+    /** The servlet path (falls back to the request URI), mirroring {@link #shouldNotFilter}. */
+    private static String requestPath(HttpServletRequest req) {
+        String path = req.getServletPath();
+        if (path == null || path.isEmpty()) {
+            path = req.getRequestURI();
+        }
+        return path == null ? "" : path;
+    }
+
+    /** Coarse endpoint class so signup/reset traffic does not consume the login bucket and vice-versa. */
+    private static String bucketGroup(String path) {
+        if (path.contains("/password-reset/")) {
+            return "reset";
+        }
+        if (path.equals("/api/v1/auth/login") || path.equals("/api/v1/auth/mfa/login")) {
+            return "login";
+        }
+        return "signup";
     }
 
     private Bucket newBucket() {

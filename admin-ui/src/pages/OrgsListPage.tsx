@@ -4,12 +4,14 @@ import { useNavigate } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
+import { motion } from 'framer-motion';
 import { orgs, apiErrorMessage } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Button, Dialog, Field, Input, StatusBadge } from '@/components/ui';
 import { DataTable, type Column } from '@/components/DataTable';
 import { PermissionGate } from '@/components/PermissionGate';
 import { useToast } from '@/lib/toast';
+import { fadeRise, staggerContainer } from '@/lib/motion';
 import type { Organization } from '@/lib/types';
 
 const schema = z.object({
@@ -87,40 +89,48 @@ export function OrgsListPage() {
 
   return (
     <div>
-      <PageHeader
-        title="Organizations"
-        description="Each customer is an organization. Subscriptions and licenses live under one."
-        actions={
-          // Aligned to the authority the create endpoint actually enforces (org.write), not the
-          // non-enforced org.create code (finding P3: UI gate codes diverged from authorities).
-          <PermissionGate permission="org.write">
-            <Button onClick={() => setOpenCreate(true)}>New organization</Button>
-          </PermissionGate>
-        }
-      />
+      {/* Page composes in on navigation; anchored to this always-mounted root so a
+          background TanStack refetch does NOT replay the cascade. */}
+      <motion.div variants={staggerContainer} initial="hidden" animate="show">
+        <motion.div variants={fadeRise}>
+          <PageHeader
+            title="Organizations"
+            description="Each customer is an organization. Subscriptions and licenses live under one."
+            actions={
+              // Aligned to the authority the create endpoint actually enforces (org.write), not the
+              // non-enforced org.create code (finding P3: UI gate codes diverged from authorities).
+              <PermissionGate permission="org.write">
+                <Button onClick={() => setOpenCreate(true)}>New organization</Button>
+              </PermissionGate>
+            }
+          />
+        </motion.div>
 
-      <DataTable
-        rows={filtered}
-        columns={columns}
-        rowKey={(o) => o.id}
-        loading={orgsQ.isLoading}
-        empty={orgsQ.isError ? apiErrorMessage(orgsQ.error) : 'No organizations yet.'}
-        onRowClick={(o) => navigate(`/orgs/${o.id}`)}
-        toolbar={
-          <div className="flex w-full items-center justify-between gap-3">
-            <Input
-              placeholder="Search by name or slug"
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              aria-label="Search organizations by name or slug"
-              className="max-w-sm"
-            />
-            <span className="hidden shrink-0 text-sm tabular-nums text-ink-muted sm:inline">
-              {filtered.length} {filtered.length === 1 ? 'organization' : 'organizations'}
-            </span>
-          </div>
-        }
-      />
+        <motion.div variants={fadeRise}>
+          <DataTable
+            rows={filtered}
+            columns={columns}
+            rowKey={(o) => o.id}
+            loading={orgsQ.isLoading}
+            empty={orgsQ.isError ? apiErrorMessage(orgsQ.error) : 'No organizations yet.'}
+            onRowClick={(o) => navigate(`/orgs/${o.id}`)}
+            toolbar={
+              <div className="flex w-full items-center justify-between gap-3">
+                <Input
+                  placeholder="Search by name or slug"
+                  value={filter}
+                  onChange={(e) => setFilter(e.target.value)}
+                  aria-label="Search organizations by name or slug"
+                  className="max-w-sm"
+                />
+                <span className="hidden shrink-0 text-sm tabular-nums text-ink-muted sm:inline">
+                  {filtered.length} {filtered.length === 1 ? 'organization' : 'organizations'}
+                </span>
+              </div>
+            }
+          />
+        </motion.div>
+      </motion.div>
 
       <Dialog
         open={openCreate}

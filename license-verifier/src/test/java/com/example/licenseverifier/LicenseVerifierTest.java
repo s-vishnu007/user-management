@@ -69,8 +69,8 @@ class LicenseVerifierTest {
 
         assertThat(license.getJti()).isEqualTo("lic_test_001");
         assertThat(license.getIssuer()).isEqualTo(ISSUER);
-        assertThat(license.getSubject()).isEqualTo("org_acme");
-        assertThat(license.getSubscriptionId()).isEqualTo("sub_acme_pro");
+        assertThat(license.getSubject()).isEqualTo("org_example");
+        assertThat(license.getSubscriptionId()).isEqualTo("sub_example_pro");
         assertThat(license.getPlan()).isEqualTo("pro");
         assertThat(license.getAudience()).containsExactly(AUDIENCE);
         assertThat(license.getPermissions()).containsExactlyInAnyOrder("export.pdf", "api.v2", "admin.users.invite");
@@ -78,8 +78,8 @@ class LicenseVerifierTest {
         assertThat(license.getVersion()).isEqualTo(1);
         assertThat(license.getKid()).isEqualTo(KID);
         assertThat(license.getCustomer()).isNotNull();
-        assertThat(license.getCustomer().orgName()).isEqualTo("Acme Corp");
-        assertThat(license.getCustomer().contactEmail()).isEqualTo("billing@acme.com");
+        assertThat(license.getCustomer().orgName()).isEqualTo("Example Corp");
+        assertThat(license.getCustomer().contactEmail()).isEqualTo("billing@example.com");
 
         assertThat(license.hasPermission("export.pdf")).isTrue();
         assertThat(license.hasPermission("not-granted")).isFalse();
@@ -103,7 +103,7 @@ class LicenseVerifierTest {
                 {
                   "license": "%s",
                   "issued_at": "2026-06-01T10:00:00Z",
-                  "customer": "Acme Corp",
+                  "customer": "Example Corp",
                   "plan": "Pro",
                   "expires_at": "2027-06-01T10:00:00Z",
                   "notes": "Drop this file at /etc/app/license.lic."
@@ -399,17 +399,17 @@ class LicenseVerifierTest {
         features.put("ai_assistant", true);
 
         Map<String, Object> customer = new LinkedHashMap<>();
-        customer.put("org_name", "Acme Corp");
-        customer.put("contact_email", "billing@acme.com");
+        customer.put("org_name", "Example Corp");
+        customer.put("contact_email", "billing@example.com");
 
         JWTClaimsSet.Builder claimsBuilder = new JWTClaimsSet.Builder()
                 .issuer(ISSUER)
                 .audience(AUDIENCE)
-                .subject("org_acme")
+                .subject("org_example")
                 .jwtID("lic_test_001")
                 .issueTime(Date.from(iat))
                 .notBeforeTime(Date.from(nbf))
-                .claim("subscription_id", "sub_acme_pro")
+                .claim("subscription_id", "sub_example_pro")
                 .claim("plan", "pro")
                 .claim("permissions", List.of("export.pdf", "api.v2", "admin.users.invite"))
                 .claim("features", features)

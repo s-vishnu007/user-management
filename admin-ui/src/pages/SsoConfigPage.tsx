@@ -138,15 +138,19 @@ export function SsoConfigPage() {
 
   return (
     <div>
-      <PageHeader
-        title="Single sign-on"
-        description="Configure SAML 2.0 or OIDC for this organization. JIT provisioning supported."
-        breadcrumb={
-          <Link to={`/orgs/${orgId}`} className="hover:text-indigo-700">
-            Organization
-          </Link>
-        }
-      />
+      {/* Header rises in on navigation; anchored to this always-mounted root so a
+          background TanStack refetch does NOT replay the entrance. */}
+      <motion.div variants={fadeRise} initial="hidden" animate="show">
+        <PageHeader
+          title="Single sign-on"
+          description="Configure SAML 2.0 or OIDC for this organization. JIT provisioning supported."
+          breadcrumb={
+            <Link to={`/orgs/${orgId}`} className="hover:text-indigo-700">
+              Organization
+            </Link>
+          }
+        />
+      </motion.div>
 
       <motion.div
         variants={staggerContainer}

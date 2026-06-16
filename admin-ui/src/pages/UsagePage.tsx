@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
 import {
   Area,
@@ -18,7 +18,7 @@ import {
 import { apiErrorMessage, usage } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, CardBody, CardHeader, PageLoader, Input, Field } from '@/components/ui';
-import { fadeRise, staggerContainer } from '@/lib/motion';
+import { chartReveal, fadeRise, staggerContainer } from '@/lib/motion';
 
 function daysAgoIso(days: number) {
   const d = new Date();
@@ -63,6 +63,10 @@ export function UsagePage() {
     queryKey: ['usage', subId, from, to],
     queryFn: () => usage.forSubscription(subId, { from, to }),
     enabled: !!subId,
+    // Keep the previous range's data visible (isLoading stays false) while a new date range loads, so
+    // the chart cascade wrapper stays mounted and does NOT replay its entrance on every date change
+    // (transitions re-audit: the wrapper lived inside the isLoading branch and remounted otherwise).
+    placeholderData: keepPreviousData,
   });
 
   const seriesData = useMemo(() => {
@@ -136,7 +140,7 @@ export function UsagePage() {
           initial="hidden"
           animate="show"
         >
-          <motion.div variants={fadeRise}>
+          <motion.div variants={chartReveal}>
             <Card>
               <CardHeader title="Events over time" />
               <CardBody>
@@ -203,7 +207,7 @@ export function UsagePage() {
             </Card>
           </motion.div>
 
-          <motion.div variants={fadeRise}>
+          <motion.div variants={chartReveal}>
             <Card>
               <CardHeader
                 title="Quota burn-down"

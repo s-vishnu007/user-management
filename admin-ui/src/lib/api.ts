@@ -13,8 +13,10 @@ import type {
   Paged,
   Permission,
   Plan,
+  RegisterResponse,
   RoleDef,
   SigningKey,
+  SsoDiscovery,
   SsoProviderConfig,
   SsoProviderDto,
   SsoProviderView,
@@ -87,6 +89,55 @@ export const auth = {
   logout: async (): Promise<void> => {
     await http.post('/api/v1/auth/logout');
   },
+  /** Self-service signup: creates a new org with the signer as OWNER and auto-logs-in. */
+  register: async (payload: {
+    fullName: string;
+    email: string;
+    password: string;
+    orgName: string;
+  }): Promise<RegisterResponse> => {
+    const { data } = await http.post<RegisterResponse>('/api/v1/auth/register', payload);
+    return data;
+  },
+  /** Consumes an email-verification token (from the link the user received). */
+  verifyEmail: async (token: string): Promise<{ verified: boolean; email: string }> => {
+    const { data } = await http.post<{ verified: boolean; email: string }>(
+      '/api/v1/auth/verify-email',
+      { token },
+    );
+    return data;
+  },
+  /** Re-issues a verification email for the currently signed-in, still-unverified user. */
+  resendVerification: async (): Promise<{
+    status: string;
+    alreadyVerified: boolean;
+    verification_token?: string;
+  }> => {
+    const { data } = await http.post('/api/v1/auth/verify-email/resend');
+    return data as { status: string; alreadyVerified: boolean; verification_token?: string };
+  },
+  /**
+   * Public SSO discovery for the login/signup screen. Pass a work email or org slug; the backend
+   * resolves the org and returns its enabled providers plus the global Google flag. Never leaks
+   * secrets. Returns null on 404 (unknown org) so callers can show "no SSO for that org".
+   */
+  ssoDiscovery: async (orgOrEmail: string): Promise<SsoDiscovery | null> => {
+    try {
+      const { data } = await http.get<SsoDiscovery>('/api/v1/auth/sso/discovery', {
+        params: { q: orgOrEmail },
+      });
+      return data;
+    } catch {
+      return null;
+    }
+  },
+  /** Browser-navigation URL that starts the per-org SSO flow (302 → IdP). Not an axios call. */
+  ssoStartUrl: (orgSlug: string, providerId?: string): string => {
+    const base = `${API_BASE}/api/v1/auth/sso/${encodeURIComponent(orgSlug)}/start`;
+    return providerId ? `${base}?provider=${encodeURIComponent(providerId)}` : base;
+  },
+  /** Browser-navigation URL for the global "Continue with Google" OIDC flow. */
+  ssoGoogleStartUrl: (): string => `${API_BASE}/api/v1/auth/sso/google/start`,
   /** Cookie-authenticated identity bootstrap; returns the unified {user, permissions, orgs}. */
   me: async (): Promise<AuthIdentity> => {
     const { data } = await http.get<MeResponse>('/api/v1/auth/me');

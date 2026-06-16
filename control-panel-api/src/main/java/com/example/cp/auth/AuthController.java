@@ -73,6 +73,9 @@ public class AuthController {
     private final AuditWriter auditWriter;
     private final TrustedProxyResolver proxyResolver;
     private final boolean exposeResetToken;
+    private final RegistrationService registrationService;
+    private final EmailVerificationService emailVerificationService;
+    private final boolean exposeVerificationToken;
 
     public AuthController(UserRepository userRepository,
                           UserService userService,
@@ -87,7 +90,10 @@ public class AuthController {
                           MfaService mfaService,
                           AuditWriter auditWriter,
                           TrustedProxyResolver proxyResolver,
-                          @Value("${app.auth.expose-reset-token:false}") boolean exposeResetToken) {
+                          @Value("${app.auth.expose-reset-token:false}") boolean exposeResetToken,
+                          RegistrationService registrationService,
+                          EmailVerificationService emailVerificationService,
+                          @Value("${app.auth.expose-verification-token:false}") boolean exposeVerificationToken) {
         this.userRepository = userRepository;
         this.userService = userService;
         this.passwordEncoder = passwordEncoder;
@@ -102,6 +108,9 @@ public class AuthController {
         this.auditWriter = auditWriter;
         this.proxyResolver = proxyResolver;
         this.exposeResetToken = exposeResetToken;
+        this.registrationService = registrationService;
+        this.emailVerificationService = emailVerificationService;
+        this.exposeVerificationToken = exposeVerificationToken;
     }
 
     /** Whether the cp_session cookie carries the Secure attribute (HTTPS-only). Off only for local dev. */
@@ -212,6 +221,18 @@ public class AuthController {
 
     /** Issues the full session token for an authenticated user and stamps last-login. */
     private LoginResponse completeSession(User user, HttpServletResponse httpResponse) {
+        SessionTokenService.IssuedToken issued = issueSessionCookie(user, httpResponse);
+        return LoginResponse.session(issued.token(), issued.expiresAt(), UserDto.from(user));
+    }
+
+    /**
+     * Mints a session token for {@code user}, stamps last-login, and sets it as the
+     * HttpOnly/Secure/SameSite=Lax {@code cp_session} cookie (accepted by JwtAuthFilter) so browser
+     * clients need not store the token in JS-readable storage (mitigates XSS token theft). Shared by
+     * password login ({@link #completeSession}) and self-service signup auto-login. The token is also
+     * returned so callers can include the Bearer accessToken in the response body.
+     */
+    private SessionTokenService.IssuedToken issueSessionCookie(User user, HttpServletResponse httpResponse) {
         Set<String> authorities = authoritiesLoader.authoritiesFor(user.getId(), null, user.isSuperAdmin());
         SessionTokenService.IssuedToken issued = tokenService.issue(
                 user.getId(), user.getEmail(), user.isSuperAdmin(), authorities, user.getTokenVersion());
@@ -219,17 +240,76 @@ public class AuthController {
         user.setLastLoginAt(OffsetDateTime.now());
         userRepository.save(user);
 
-        // Also set the session JWT as an HttpOnly/Secure/SameSite=Lax cookie ("cp_session", accepted by
-        // JwtAuthFilter) so browser clients need not store the token in JS-readable localStorage
-        // (mitigates XSS token theft, finding #32). The accessToken is still returned in the body for
-        // non-browser/Bearer clients.
         ResponseCookie cookie = ResponseCookie.from("cp_session", issued.token())
                 .httpOnly(true).secure(cookieSecure).sameSite("Lax").path("/")
                 .maxAge(tokenService.ttl())
                 .build();
         httpResponse.addHeader(HttpHeaders.SET_COOKIE, cookie.toString());
+        return issued;
+    }
 
-        return LoginResponse.session(issued.token(), issued.expiresAt(), UserDto.from(user));
+    /**
+     * Self-service signup: creates a new organization with the caller as OWNER plus a new ACTIVE
+     * (email-unverified) user, then auto-logs them in (sets the cp_session cookie). Public and
+     * rate-limited (see {@code RateLimitFilter}). Email verification is non-blocking; the raw
+     * verification token is returned only in dev ({@code app.auth.expose-verification-token=true}) —
+     * in prod it is emailed via the outbox {@code email.verification.requested} event.
+     */
+    @PostMapping("/register")
+    @Transactional
+    public RegisterResponse register(@Valid @RequestBody RegisterRequest body, HttpServletRequest request,
+                                     HttpServletResponse httpResponse) {
+        RegistrationService.Result result = registrationService.register(
+                body.fullName(), body.email(), body.password(), body.orgName(),
+                proxyResolver.resolveClientIp(request));
+        User user = result.user();
+        SessionTokenService.IssuedToken issued = issueSessionCookie(user, httpResponse);
+        AuditContext.set("auth.register");
+        AuditContext.setTarget("user", user.getId().toString());
+        AuditContext.putPayload("org_id", result.org().getId().toString());
+        String token = exposeVerificationToken ? result.verificationToken() : null;
+        return new RegisterResponse(issued.token(), issued.expiresAt(), UserDto.from(user),
+                result.orgSlug(), true, token);
+    }
+
+    /**
+     * Confirms an email-verification token (public — the link may be opened in any browser, even one
+     * without a session). Flips the user's {@code email_verified} flag; idempotent-ish via the
+     * single-use token guard. Does not establish a session.
+     */
+    @PostMapping("/verify-email")
+    @Transactional
+    public Map<String, Object> verifyEmail(@Valid @RequestBody VerifyEmailRequest body) {
+        User user = emailVerificationService.verify(body.token());
+        AuditContext.set("auth.email.verified");
+        AuditContext.setTarget("user", user.getId().toString());
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("verified", true);
+        response.put("email", user.getEmail());
+        return response;
+    }
+
+    /**
+     * Re-issues a verification token for the currently-authenticated, still-unverified user (the
+     * "resend" action behind the verify-your-email banner). Requires a session. The raw token is
+     * returned only in dev; in prod it is emailed via the outbox.
+     */
+    @PostMapping("/verify-email/resend")
+    @Transactional
+    public Map<String, Object> resendVerification() {
+        AuthenticatedUser me = SecurityUtils.requireUser();
+        User user = userRepository.findById(me.userId())
+                .orElseThrow(() -> ApiException.unauthorized("User not found"));
+        String raw = emailVerificationService.resend(user);
+        AuditContext.set("auth.email.verification.resent");
+        AuditContext.setTarget("user", user.getId().toString());
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", "ok");
+        response.put("alreadyVerified", user.isEmailVerified());
+        if (exposeVerificationToken && raw != null) {
+            response.put("verification_token", raw);
+        }
+        return response;
     }
 
     @PostMapping("/logout")
@@ -346,7 +426,8 @@ public class AuthController {
         PasswordResetToken token = resetTokenRepository.findByTokenHash(hash)
                 .orElseThrow(() -> ApiException.badRequest("Invalid or expired token"));
         if (token.getUsedAt() != null) {
-            throw ApiException.badRequest("Token already used");
+            // Generic message — don't leak that the token existed and was already consumed (re-audit #10).
+            throw ApiException.badRequest("Invalid or expired token");
         }
         if (token.getExpiresAt() == null || token.getExpiresAt().isBefore(OffsetDateTime.now())) {
             throw ApiException.badRequest("Invalid or expired token");
@@ -455,6 +536,19 @@ public class AuthController {
     public record PasswordResetConfirm(
             @NotBlank String token,
             @NotBlank @Size(min = 8, max = 255) String newPassword) {}
+
+    public record RegisterRequest(
+            @NotBlank @Size(max = 255) String fullName,
+            @NotBlank @Email @Size(max = 320) String email,
+            @NotBlank @Size(min = 12, max = 72) String password,
+            @NotBlank @Size(max = 255) String orgName) {}
+
+    @com.fasterxml.jackson.annotation.JsonInclude(
+            com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+    public record RegisterResponse(String accessToken, Instant expiresAt, UserDto user, String orgSlug,
+                                   boolean emailVerificationSent, String verificationToken) {}
+
+    public record VerifyEmailRequest(@NotBlank String token) {}
 
     public record OrgMembershipDto(UUID orgId, String slug, String name, String role) {}
 

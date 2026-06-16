@@ -54,6 +54,15 @@ public class User {
     @Column(name = "super_admin", nullable = false)
     private boolean superAdmin;
 
+    /**
+     * Whether the user's email address has been confirmed. Self-service signups start {@code false}
+     * (verification is non-blocking — they can still sign in); administratively-created and
+     * pre-existing users are {@code true}. See migration 19.
+     */
+    @Column(name = "email_verified", nullable = false)
+    @Builder.Default
+    private boolean emailVerified = false;
+
     @Column(name = "token_version", nullable = false)
     @Builder.Default
     private long tokenVersion = 0L;

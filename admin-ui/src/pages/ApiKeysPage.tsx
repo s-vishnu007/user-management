@@ -4,12 +4,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
+import { motion } from 'framer-motion';
 import { apiErrorMessage, apiKeys } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Badge, Button, Dialog, Field, Input } from '@/components/ui';
 import { DataTable, type Column } from '@/components/DataTable';
 import { PermissionGate } from '@/components/PermissionGate';
 import { useToast } from '@/lib/toast';
+import { fadeRise, staggerContainer } from '@/lib/motion';
 import type { ApiKey } from '@/lib/types';
 
 const schema = z.object({
@@ -145,31 +147,39 @@ export function ApiKeysPage() {
 
   return (
     <div>
-      <PageHeader
-        title="API keys"
-        description="Programmatic access to the control plane API for CI pipelines and integrations."
-        breadcrumb={
-          <Link
-            to={`/orgs/${orgId}`}
-            className="rounded transition-colors hover:text-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
-          >
-            Organization
-          </Link>
-        }
-        actions={
-          <PermissionGate permission="api-key.create">
-            <Button onClick={() => setOpenCreate(true)}>New API key</Button>
-          </PermissionGate>
-        }
-      />
+      {/* Composes in on navigation; anchored to this always-mounted root so a
+          background TanStack refetch does NOT replay the cascade. */}
+      <motion.div variants={staggerContainer} initial="hidden" animate="show">
+        <motion.div variants={fadeRise}>
+          <PageHeader
+            title="API keys"
+            description="Programmatic access to the control plane API for CI pipelines and integrations."
+            breadcrumb={
+              <Link
+                to={`/orgs/${orgId}`}
+                className="rounded transition-colors hover:text-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
+              >
+                Organization
+              </Link>
+            }
+            actions={
+              <PermissionGate permission="api-key.create">
+                <Button onClick={() => setOpenCreate(true)}>New API key</Button>
+              </PermissionGate>
+            }
+          />
+        </motion.div>
 
-      <DataTable
-        rows={keysQ.data}
-        columns={columns}
-        rowKey={(k) => k.id}
-        loading={keysQ.isLoading}
-        empty={keysQ.isError ? apiErrorMessage(keysQ.error) : 'No API keys yet.'}
-      />
+        <motion.div variants={fadeRise}>
+          <DataTable
+            rows={keysQ.data}
+            columns={columns}
+            rowKey={(k) => k.id}
+            loading={keysQ.isLoading}
+            empty={keysQ.isError ? apiErrorMessage(keysQ.error) : 'No API keys yet.'}
+          />
+        </motion.div>
+      </motion.div>
 
       <Dialog
         open={openCreate}

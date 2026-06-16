@@ -1,8 +1,11 @@
 package com.example.cp.sso;
 
 import com.example.cp.audit.AuditWriter;
+import com.example.cp.mfa.MfaService;
 import com.example.cp.orgs.OrgMember;
 import com.example.cp.orgs.OrgMemberRepository;
+import com.example.cp.orgs.OrgService;
+import com.example.cp.orgs.Organization;
 import com.example.cp.users.User;
 import com.example.cp.users.UserRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -15,6 +18,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -35,6 +39,8 @@ class SsoProvisioningServiceTest {
     private OrgMemberRepository memberRepo;
     private SsoIdentityRepository identityRepo;
     private AuditWriter auditWriter;
+    private OrgService orgService;
+    private MfaService mfaService;
     private SsoProvisioningService service;
 
     @BeforeEach
@@ -43,8 +49,10 @@ class SsoProvisioningServiceTest {
         memberRepo = mock(OrgMemberRepository.class);
         identityRepo = mock(SsoIdentityRepository.class);
         auditWriter = mock(AuditWriter.class);
+        orgService = mock(OrgService.class);
+        mfaService = mock(MfaService.class);
         when(memberRepo.findByOrgIdAndUserId(any(), any())).thenReturn(Optional.empty());
-        service = new SsoProvisioningService(userRepo, memberRepo, identityRepo, auditWriter);
+        service = new SsoProvisioningService(userRepo, memberRepo, identityRepo, auditWriter, orgService, mfaService);
     }
 
     private SsoProvider provider() {
@@ -130,5 +138,80 @@ class SsoProvisioningServiceTest {
         service.provision(provider(), "sub-4", "x@example.com", "X", null, "x***@example.com", "ip");
 
         verify(memberRepo, never()).save(any());
+    }
+
+    // ── Global "Continue with Google" (provisionGlobal) — re-audit blocker hardening ──────────────
+
+    @Test
+    @DisplayName("global Google REFUSES to log into a pre-existing password account (no takeover)")
+    void globalGoogleRefusesPasswordAccount() {
+        User pwUser = User.builder().id(UUID.randomUUID()).email("victim@example.com")
+                .passwordHash("$2a$10$hash").status(User.Status.ACTIVE).superAdmin(false).tokenVersion(0L).build();
+        when(userRepo.findByEmail("victim@example.com")).thenReturn(Optional.of(pwUser));
+
+        assertThatThrownBy(() ->
+                service.provisionGlobal("victim@example.com", "V", "ip", "v***@example.com"))
+                .isInstanceOf(IllegalStateException.class);
+        verify(userRepo, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("global Google REFUSES a pre-existing super-admin account")
+    void globalGoogleRefusesSuperAdmin() {
+        User admin = User.builder().id(UUID.randomUUID()).email("admin@example.com")
+                .status(User.Status.ACTIVE).superAdmin(true).tokenVersion(0L).build();
+        when(userRepo.findByEmail("admin@example.com")).thenReturn(Optional.of(admin));
+
+        assertThatThrownBy(() ->
+                service.provisionGlobal("admin@example.com", "A", "ip", "a***@example.com"))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    @DisplayName("global Google REFUSES an MFA-protected account (no second-factor bypass)")
+    void globalGoogleRefusesMfaAccount() {
+        UUID id = UUID.randomUUID();
+        User mfaUser = User.builder().id(id).email("mfa@example.com")
+                .status(User.Status.ACTIVE).superAdmin(false).tokenVersion(0L).build();
+        when(userRepo.findByEmail("mfa@example.com")).thenReturn(Optional.of(mfaUser));
+        when(mfaService.isEnabled(id)).thenReturn(true);
+
+        assertThatThrownBy(() ->
+                service.provisionGlobal("mfa@example.com", "M", "ip", "m***@example.com"))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    @DisplayName("global Google JIT-creates a verified, non-super-admin user with its own org")
+    void globalGoogleJitCreatesUserAndOrg() {
+        when(userRepo.findByEmail("new@example.com")).thenReturn(Optional.empty());
+        when(userRepo.save(any(User.class))).thenAnswer(i -> i.getArgument(0));
+        Organization org = Organization.builder().id(UUID.randomUUID()).slug("news-org")
+                .name("New's Organization").status(Organization.Status.ACTIVE).build();
+        when(orgService.createOrgFromName(any(), any())).thenReturn(org);
+
+        service.provisionGlobal("new@example.com", "New", "ip", "n***@example.com");
+
+        ArgumentCaptor<User> cap = ArgumentCaptor.forClass(User.class);
+        verify(userRepo).save(cap.capture());
+        assertThat(cap.getValue().isSuperAdmin()).isFalse();
+        assertThat(cap.getValue().isEmailVerified()).isTrue();
+        verify(orgService).createOrgFromName(any(), any());
+    }
+
+    @Test
+    @DisplayName("global Google resumes a genuine SSO-only account (no password, no MFA)")
+    void globalGoogleResumesSsoOnlyAccount() {
+        UUID id = UUID.randomUUID();
+        User ssoUser = User.builder().id(id).email("sso@example.com")
+                .status(User.Status.ACTIVE).superAdmin(false).tokenVersion(0L).build();
+        when(userRepo.findByEmail("sso@example.com")).thenReturn(Optional.of(ssoUser));
+        when(mfaService.isEnabled(id)).thenReturn(false);
+
+        SsoProvisioningService.ProvisionResult result =
+                service.provisionGlobal("sso@example.com", "S", "ip", "s***@example.com");
+
+        assertThat(result.user().getId()).isEqualTo(id);
+        verify(userRepo, never()).save(any());
     }
 }

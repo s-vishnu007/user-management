@@ -1,5 +1,7 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import { cn } from '@/lib/cn';
+import { dialogContent, dialogItem, dialogPanel, overlayBackdrop } from '@/lib/motion';
 
 export function Dialog({
   open,
@@ -56,8 +58,6 @@ export function Dialog({
     };
   }, [open]);
 
-  if (!open) return null;
-
   const sizeClass = {
     sm: 'max-w-sm',
     md: 'max-w-md',
@@ -98,49 +98,74 @@ export function Dialog({
     }
   };
 
+  // AnimatePresence keeps the panel mounted through its exit animation. The
+  // backdrop blooms in, the panel springs up with a pop, and the header/body/
+  // footer choreograph in just behind it. MotionConfig (reducedMotion="user")
+  // collapses all of this to a plain opacity fade for reduced-motion users.
   return (
-    <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto p-4 sm:p-8">
-      <div
-        className="fixed inset-0 bg-slate-900/40 motion-safe:animate-fade-in"
-        onClick={onClose}
-        aria-hidden="true"
-      />
-      <div
-        ref={panelRef}
-        tabIndex={-1}
-        onKeyDown={onPanelKeyDown}
-        className={cn(
-          'relative z-10 mt-4 sm:mt-12 w-full rounded-2xl bg-white/90 backdrop-blur-glass backdrop-saturate-150',
-          'border border-white/70 shadow-glass-xl ring-1 ring-slate-900/5',
-          'motion-safe:animate-scale-in focus:outline-none',
-          sizeClass,
-        )}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={title ? titleId : undefined}
-        aria-describedby={description ? descId : undefined}
-      >
-        {(title || description) && (
-          <div className="border-b border-slate-900/5 px-5 py-4">
-            {title ? (
-              <h3 id={titleId} className="font-display text-base font-semibold tracking-tight text-ink">
-                {title}
-              </h3>
-            ) : null}
-            {description ? (
-              <p id={descId} className="mt-1 text-sm text-ink-muted">
-                {description}
-              </p>
-            ) : null}
-          </div>
-        )}
-        <div className="px-5 py-4">{children}</div>
-        {footer ? (
-          <div className="flex items-center justify-end gap-2 border-t border-slate-900/5 bg-white/40 px-5 py-3">
-            {footer}
-          </div>
-        ) : null}
-      </div>
-    </div>
+    <AnimatePresence>
+      {open ? (
+        <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto p-4 sm:p-8">
+          <motion.div
+            className="fixed inset-0 bg-slate-900/40"
+            onClick={onClose}
+            aria-hidden="true"
+            variants={overlayBackdrop}
+            initial="hidden"
+            animate="show"
+            exit="exit"
+          />
+          <motion.div
+            ref={panelRef}
+            tabIndex={-1}
+            onKeyDown={onPanelKeyDown}
+            className={cn(
+              'relative z-10 mt-4 sm:mt-12 w-full rounded-2xl bg-white/90 backdrop-blur-glass backdrop-saturate-150',
+              'border border-white/70 shadow-glass-xl ring-1 ring-slate-900/5 focus:outline-none',
+              sizeClass,
+            )}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={title ? titleId : undefined}
+            aria-describedby={description ? descId : undefined}
+            variants={dialogPanel}
+            initial="hidden"
+            animate="show"
+            exit="exit"
+          >
+            <motion.div variants={dialogContent} initial="hidden" animate="show">
+              {title || description ? (
+                <motion.div variants={dialogItem} className="border-b border-slate-900/5 px-5 py-4">
+                  {title ? (
+                    <h3
+                      id={titleId}
+                      className="font-display text-base font-semibold tracking-tight text-ink"
+                    >
+                      {title}
+                    </h3>
+                  ) : null}
+                  {description ? (
+                    <p id={descId} className="mt-1 text-sm text-ink-muted">
+                      {description}
+                    </p>
+                  ) : null}
+                </motion.div>
+              ) : null}
+              <motion.div variants={dialogItem} className="px-5 py-4">
+                {children}
+              </motion.div>
+              {footer ? (
+                <motion.div
+                  variants={dialogItem}
+                  className="flex items-center justify-end gap-2 border-t border-slate-900/5 bg-white/40 px-5 py-3"
+                >
+                  {footer}
+                </motion.div>
+              ) : null}
+            </motion.div>
+          </motion.div>
+        </div>
+      ) : null}
+    </AnimatePresence>
   );
 }

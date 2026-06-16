@@ -94,6 +94,36 @@ public class SsoSuccessHandler implements AuthenticationSuccessHandler {
             return;
         }
 
+        // Global (org-less) Google sign-in has no per-org provider or domain allow-list: identity is
+        // the (already-verified) Google email. It takes its own provisioning path that mints the user
+        // their own organization, instead of the per-org provider gates below.
+        if ("google".equals(registrationId(authentication))) {
+            // Global Google links by verified email, so require a POSITIVE email_verified=true
+            // assertion (not merely "not explicitly false") before provisioning (re-audit high #2).
+            if (!isEmailVerifiedTrue(authentication)) {
+                log.warn("Global Google sign-in for {} without a positive email_verified assertion — refusing",
+                        mask(email));
+                auditWriter.record(null, null, "sso.login", "sso", "google",
+                        Map.of("reason", "email-not-verified", "email", mask(email)), ip, AuditOutcome.DENIED, false);
+                response.sendRedirect(uiBaseUrl + "?sso=unverified");
+                return;
+            }
+            User googleUser;
+            try {
+                googleUser = provisioningService.provisionGlobal(email, name, ip, mask(email)).user();
+            } catch (RuntimeException e) {
+                log.warn("Global Google provisioning failed for {} — no partial state committed: {}",
+                        mask(email), e.toString());
+                auditWriter.record(null, null, "sso.login", "sso", "google",
+                        Map.of("reason", "provisioning-failed", "email", mask(email)), ip, AuditOutcome.DENIED, false);
+                response.sendRedirect(uiBaseUrl + "?sso=error");
+                return;
+            }
+            issueSessionCookie(response, googleUser);
+            response.sendRedirect(uiBaseUrl + "?sso=success");
+            return;
+        }
+
         // 1) Strong binding: an existing (provider, subject) identity wins regardless of the asserted
         //    email, so a hostile IdP that changes the email it sends cannot hijack another account.
         //    This is a READ here purely to decide whether the new-binding gates below apply; the
@@ -162,6 +192,17 @@ public class SsoSuccessHandler implements AuthenticationSuccessHandler {
         response.addCookie(cookie);
     }
 
+    /** The raw Spring Security registration id ("google", "oidc-&lt;uuid&gt;", "saml-&lt;uuid&gt;"), or null. */
+    private static String registrationId(Authentication auth) {
+        if (auth instanceof OAuth2AuthenticationToken o) {
+            return o.getAuthorizedClientRegistrationId();
+        }
+        if (auth.getPrincipal() instanceof Saml2AuthenticatedPrincipal s) {
+            return s.getRelyingPartyRegistrationId();
+        }
+        return null;
+    }
+
     /** Resolve the {@link SsoProvider} from the registration id (oidc-&lt;uuid&gt; / saml-&lt;uuid&gt;). */
     private SsoProvider resolveProvider(Authentication auth) {
         String registrationId = null;
@@ -222,6 +263,20 @@ public class SsoSuccessHandler implements AuthenticationSuccessHandler {
             Object v = o.getAttributes().get("email_verified");
             if (v instanceof Boolean b) return !b;
             if (v instanceof String s) return "false".equalsIgnoreCase(s.trim());
+        }
+        return false;
+    }
+
+    /**
+     * True only when the IdP POSITIVELY asserts email_verified == true (Boolean true or "true").
+     * Used to gate the global Google flow, which links by email and so must not accept an absent
+     * or non-boolean claim as "verified".
+     */
+    private boolean isEmailVerifiedTrue(Authentication auth) {
+        if (auth.getPrincipal() instanceof OAuth2User o) {
+            Object v = o.getAttributes().get("email_verified");
+            if (v instanceof Boolean b) return b;
+            if (v instanceof String s) return "true".equalsIgnoreCase(s.trim());
         }
         return false;
     }

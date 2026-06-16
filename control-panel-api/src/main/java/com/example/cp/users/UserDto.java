@@ -9,6 +9,7 @@ public record UserDto(
         String fullName,
         String status,
         boolean superAdmin,
+        boolean emailVerified,
         OffsetDateTime createdAt,
         OffsetDateTime lastLoginAt
 ) {
@@ -19,6 +20,7 @@ public record UserDto(
                 u.getFullName(),
                 u.getStatus() == null ? null : u.getStatus().name(),
                 u.isSuperAdmin(),
+                u.isEmailVerified(),
                 u.getCreatedAt(),
                 u.getLastLoginAt()
         );

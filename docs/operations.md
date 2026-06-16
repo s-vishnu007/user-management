@@ -451,7 +451,7 @@ A bold warning header: this file intentionally relaxes security for local dev. T
 
 - **Datasource:** restores localhost fallbacks `jdbc:postgresql://localhost:5432/cp`, `cp`/`cp` (still env-overridable).
 - **springdoc:** re-enables `api-docs` and `swagger-ui`.
-- **`app.dev.bootstrap-admin`** (consumed by `com.example.cp.auth.DevBootstrapAdmin`, `@Profile("dev")`): on startup, *if the users table is empty*, seeds an ACTIVE org (slug `acme`), a super-admin user, and an OWNER membership; logs the credentials at WARN. Idempotent (only runs at zero users), never touches the test profile, adds no migration. Overridable via `APP_BOOTSTRAP_ADMIN_EMAIL` (default `admin@example.com`), `APP_BOOTSTRAP_ADMIN_PASSWORD` (default `Admin123!ChangeMe`), `APP_BOOTSTRAP_ORG_NAME` (default `Acme (dev)`); set `enabled: false` to disable.
+- **`app.dev.bootstrap-admin`** (consumed by `com.example.cp.auth.DevBootstrapAdmin`, `@Profile("dev")`): on startup, *if the users table is empty*, seeds an ACTIVE org (slug `keyforge-dev`), a super-admin user, and an OWNER membership; logs the credentials at WARN. Idempotent (only runs at zero users), never touches the test profile, adds no migration. Overridable via `APP_BOOTSTRAP_ADMIN_EMAIL` (default `admin@example.com`), `APP_BOOTSTRAP_ADMIN_PASSWORD` (default `Admin123!ChangeMe`), `APP_BOOTSTRAP_ORG_NAME` (default `Keyforge (dev)`); set `enabled: false` to disable.
 - `auth.expose-reset-token: true` — return the raw reset token in API responses (no mail server locally).
 - `cors.allowed-origins`: permissive (`localhost:5173`, `127.0.0.1:5173`, `localhost:3000`).
 - `management.endpoint.health.show-details: always`.
@@ -556,7 +556,7 @@ The reference consumer's config (drives the `license-verifier` starter).
 | `SPRING_PROFILES_ACTIVE` | Active profile(s) (`prod`/`json` ⇒ JSON logs) | recommended | none (→ plain logs) |
 | `APP_BOOTSTRAP_ADMIN_EMAIL` | Dev seed admin email (dev profile only) | No | `admin@example.com` |
 | `APP_BOOTSTRAP_ADMIN_PASSWORD` | Dev seed admin password | No | `Admin123!ChangeMe` |
-| `APP_BOOTSTRAP_ORG_NAME` | Dev seed org name | No | `Acme (dev)` |
+| `APP_BOOTSTRAP_ORG_NAME` | Dev seed org name | No | `Keyforge (dev)` |
 
 ## 6.2 docker-compose (Postgres/Redis services)
 

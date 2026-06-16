@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import { auth, setUnauthorizedHandler } from './api';
-import type { LoginResponse, OrgMembership, User } from './types';
+import type { LoginResponse, OrgMembership, RegisterResponse, User } from './types';
 
 /** Result of a login attempt: either authenticated or an MFA challenge requiring a TOTP step. */
 export type LoginResult =
@@ -23,6 +23,13 @@ interface AuthCtx {
   ready: boolean;
   loading: boolean;
   login: (email: string, password: string) => Promise<LoginResult>;
+  /** Self-service signup; the backend auto-logs-in, so this bootstraps identity on success. */
+  register: (payload: {
+    fullName: string;
+    email: string;
+    password: string;
+    orgName: string;
+  }) => Promise<RegisterResponse>;
   /** Completes an MFA login by exchanging the signed challenge + TOTP code for a session. */
   completeMfa: (challenge: string, code: string) => Promise<void>;
   logout: () => Promise<void>;
@@ -83,6 +90,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { mfaRequired: false };
   }, [refresh]);
 
+  const register = useCallback(
+    async (payload: { fullName: string; email: string; password: string; orgName: string }) => {
+      const res = await auth.register(payload);
+      // The backend set the cp_session cookie (auto-login); bootstrap the identity envelope so the
+      // permission set is available, exactly like login().
+      await refresh();
+      return res;
+    },
+    [refresh],
+  );
+
   const completeMfa = useCallback(async (challenge: string, code: string) => {
     await auth.mfaLogin(challenge, code);
     await refresh();
@@ -117,12 +135,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       ready,
       loading: !ready,
       login,
+      register,
       completeMfa,
       logout,
       refresh,
       hasPermission,
     }),
-    [user, permissions, orgs, ready, login, completeMfa, logout, refresh, hasPermission],
+    [user, permissions, orgs, ready, login, register, completeMfa, logout, refresh, hasPermission],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

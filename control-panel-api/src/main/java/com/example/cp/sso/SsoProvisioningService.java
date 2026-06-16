@@ -3,8 +3,11 @@ package com.example.cp.sso;
 import com.example.cp.audit.AuditOutcome;
 import com.example.cp.audit.AuditWriter;
 import com.example.cp.common.Ids;
+import com.example.cp.mfa.MfaService;
 import com.example.cp.orgs.OrgMember;
 import com.example.cp.orgs.OrgMemberRepository;
+import com.example.cp.orgs.OrgService;
+import com.example.cp.orgs.Organization;
 import com.example.cp.users.User;
 import com.example.cp.users.UserRepository;
 import org.springframework.stereotype.Service;
@@ -37,13 +40,18 @@ public class SsoProvisioningService {
     private final OrgMemberRepository memberRepo;
     private final SsoIdentityRepository identityRepo;
     private final AuditWriter auditWriter;
+    private final OrgService orgService;
+    private final MfaService mfaService;
 
     public SsoProvisioningService(UserRepository userRepo, OrgMemberRepository memberRepo,
-                                  SsoIdentityRepository identityRepo, AuditWriter auditWriter) {
+                                  SsoIdentityRepository identityRepo, AuditWriter auditWriter,
+                                  OrgService orgService, MfaService mfaService) {
         this.userRepo = userRepo;
         this.memberRepo = memberRepo;
         this.identityRepo = identityRepo;
         this.auditWriter = auditWriter;
+        this.orgService = orgService;
+        this.mfaService = mfaService;
     }
 
     /** The resolved/provisioned user for a successful SSO login (after the handler's gating passed). */
@@ -117,13 +125,83 @@ public class SsoProvisioningService {
         return new ProvisionResult(user);
     }
 
+    /**
+     * Provisioning for the <em>global</em> (org-less) Google sign-in: there is no per-org
+     * {@link SsoProvider} or domain allow-list, so identity is keyed purely on the verified email.
+     *
+     * <p>The caller has already enforced that Google asserted a verified email (unverified is blocked
+     * upstream), so linking by email is safe here. An existing user simply logs in (no elevation). A
+     * brand-new user is JIT-created (ACTIVE, email_verified=true, never super-admin) and given their
+     * own organization as OWNER — mirroring password signup. All writes commit in one transaction.
+     */
+    @Transactional
+    public ProvisionResult provisionGlobal(String email, String name, String ip, String maskedEmail) {
+        Optional<User> existing = userRepo.findByEmail(email);
+        if (existing.isPresent()) {
+            User u = existing.get();
+            // SECURITY (re-audit blocker): a global Google login must NEVER auto-link to a
+            // pre-existing account by email alone — that would let anyone holding a Google identity for
+            // a victim's address log straight into the victim's account. Only a genuinely SSO-only
+            // account (no password, not a super-admin, ACTIVE, no MFA enrolled) may be resumed this way.
+            // Everyone else must use their existing method (password / their org's SSO), which keeps the
+            // password check, the super-admin boundary, and the MFA second factor intact.
+            boolean ssoOnly = u.getPasswordHash() == null
+                    && !u.isSuperAdmin()
+                    && u.getStatus() == User.Status.ACTIVE
+                    && !mfaService.isEnabled(u.getId());
+            if (!ssoOnly) {
+                auditWriter.record(u.getId(), null, "sso.login", "user", u.getId().toString(),
+                        Map.of("email", maskedEmail, "via", "google", "reason", "existing-non-sso-account"),
+                        ip, AuditOutcome.DENIED, false);
+                throw new IllegalStateException("An account already exists for this email; sign in with your existing method");
+            }
+            auditWriter.record(u.getId(), null, "sso.login", "user", u.getId().toString(),
+                    Map.of("email", maskedEmail, "via", "google"), ip, AuditOutcome.SUCCESS, false);
+            return new ProvisionResult(u);
+        }
+        User user = userRepo.save(User.builder()
+                .id(Ids.newId())
+                .email(email)
+                .fullName(name)
+                .status(User.Status.ACTIVE)
+                .superAdmin(false)
+                .emailVerified(true)
+                .createdAt(OffsetDateTime.now())
+                .build());
+        auditWriter.record(user.getId(), null, "user.created", "user", user.getId().toString(),
+                Map.of("via", "google", "email", maskedEmail), ip, AuditOutcome.SUCCESS, false);
+
+        Organization org = orgService.createOrgFromName(deriveOrgName(name, email), user.getId());
+        auditWriter.record(user.getId(), org.getId(), "org.created", "organization", org.getId().toString(),
+                Map.of("via", "google"), ip, AuditOutcome.SUCCESS, false);
+        auditWriter.record(user.getId(), org.getId(), "sso.login", "user", user.getId().toString(),
+                Map.of("email", maskedEmail, "via", "google"), ip, AuditOutcome.SUCCESS, false);
+        return new ProvisionResult(user);
+    }
+
+    private static String deriveOrgName(String name, String email) {
+        if (name != null && !name.isBlank()) {
+            return name + "'s Organization";
+        }
+        String local = email;
+        int at = email.indexOf('@');
+        if (at > 0) {
+            local = email.substring(0, at);
+        }
+        return local + "'s Organization";
+    }
+
     private User jitCreateUser(String email, String name) {
+        // The handler has already enforced the IdP email-verified gate before we get here, so mark the
+        // JIT user verified — consistent with provisionGlobal, DevBootstrapAdmin, and migration 19's
+        // grandfathering of SSO/JIT users (re-audit medium #6).
         User u = User.builder()
                 .id(Ids.newId())
                 .email(email)
                 .fullName(name)
                 .status(User.Status.ACTIVE)
                 .superAdmin(false)
+                .emailVerified(true)
                 .createdAt(OffsetDateTime.now())
                 .build();
         return userRepo.save(u);

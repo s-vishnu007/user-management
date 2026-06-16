@@ -272,6 +272,13 @@ h2 {
   body::after {
     animation: none !important;
   }
+  /* Loading spinners are a recognized reduced-motion EXCEPTION: they convey ongoing status, not
+     decorative motion. Keep them turning rather than freezing as a static partial ring. The class
+     selector outranks the `*` net above, so this wins regardless of order. */
+  .animate-spin {
+    animation-duration: 0.7s !important;
+    animation-iteration-count: infinite !important;
+  }
 }
 
 /* Ambient aurora drift — only for users who allow motion. */

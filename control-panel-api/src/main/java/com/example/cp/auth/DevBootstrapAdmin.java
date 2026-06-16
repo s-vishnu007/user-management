@@ -39,7 +39,7 @@ import java.time.OffsetDateTime;
  * </ul>
  *
  * <p>On {@link ApplicationReadyEvent}, when there are zero users, it creates: an {@code ACTIVE}
- * organization (slug {@code acme}), a super-admin {@link User} ({@code superAdmin=true},
+ * organization (slug {@code keyforge-dev}), a super-admin {@link User} ({@code superAdmin=true},
  * {@code ACTIVE}) with a bcrypt-hashed password from {@link PasswordConfig}'s {@link PasswordEncoder}
  * bean, and an {@code OWNER} {@link OrgMember} row linking them. The credentials used are logged at
  * {@code WARN} so a developer can immediately sign in.
@@ -56,7 +56,7 @@ public class DevBootstrapAdmin {
 
     private static final Logger log = LoggerFactory.getLogger(DevBootstrapAdmin.class);
 
-    private static final String ORG_SLUG = "acme";
+    private static final String ORG_SLUG = "keyforge-dev";
 
     private final UserRepository userRepository;
     private final OrganizationRepository orgRepository;
@@ -75,7 +75,7 @@ public class DevBootstrapAdmin {
                              String adminEmail,
                              @Value("${app.dev.bootstrap-admin.password:${APP_BOOTSTRAP_ADMIN_PASSWORD:Admin123!ChangeMe}}")
                              String adminPassword,
-                             @Value("${app.dev.bootstrap-admin.org-name:${APP_BOOTSTRAP_ORG_NAME:Acme (dev)}}")
+                             @Value("${app.dev.bootstrap-admin.org-name:${APP_BOOTSTRAP_ORG_NAME:Keyforge (dev)}}")
                              String orgName) {
         this.userRepository = userRepository;
         this.orgRepository = orgRepository;
@@ -119,6 +119,7 @@ public class DevBootstrapAdmin {
                 .passwordHash(passwordEncoder.encode(adminPassword))
                 .status(User.Status.ACTIVE)
                 .superAdmin(true)
+                .emailVerified(true)
                 .createdAt(now)
                 .build());
 

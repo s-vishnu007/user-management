@@ -5,6 +5,7 @@ import { Link, Navigate, useLocation, useNavigate, useSearchParams } from 'react
 import { useAuth } from '@/lib/auth';
 import { apiErrorMessage } from '@/lib/api';
 import { Button, Field, Input } from '@/components/ui';
+import { SsoButtons } from '@/components/SsoButtons';
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { fadeRise, staggerContainer, DURATION, EASE } from '@/lib/motion';
@@ -119,13 +120,13 @@ export function LoginPage() {
 
           <div className="relative">
             <div className="grid h-12 w-12 place-items-center rounded-2xl bg-white/15 text-lg font-bold ring-1 ring-white/30 backdrop-blur">
-              CP
+              KF
             </div>
             <h2 className="mt-8 font-display text-3xl font-semibold leading-tight tracking-tight">
-              Control Panel
+              Keyforge
             </h2>
             <p className="mt-3 max-w-xs text-sm leading-relaxed text-white/80">
-              The luminous command center for your licensing platform.
+              The command center for your licensing platform.
             </p>
           </div>
 
@@ -149,7 +150,7 @@ export function LoginPage() {
             <div className="mb-7 text-center lg:text-left">
               {/* Mobile-only brand chip (the showcase pane is hidden under lg). */}
               <div className="mx-auto mb-4 grid h-11 w-11 place-items-center rounded-xl bg-aurora-primary text-base font-bold text-white shadow-glow lg:hidden">
-                CP
+                KF
               </div>
               <h1 className="font-display text-2xl font-semibold tracking-tight text-ink">
                 {challenge ? 'Two-factor authentication' : 'Welcome back'}
@@ -175,80 +176,123 @@ export function LoginPage() {
 
             {challenge ? (
               <form onSubmit={onSubmitMfa} className="space-y-4">
-                <Field
-                  label="Authentication code"
-                  htmlFor="mfa-code"
-                  required
-                  error={mfaForm.formState.errors.code?.message}
+                {/* Cascade the MFA field + actions in. Anchored to this branch's mount, so it
+                    plays once when the two-factor step appears (not on every render). */}
+                <motion.div
+                  variants={staggerContainer}
+                  initial="hidden"
+                  animate="show"
+                  className="space-y-4"
                 >
-                  <Input
-                    id="mfa-code"
-                    inputMode="numeric"
-                    autoComplete="one-time-code"
-                    maxLength={6}
-                    placeholder="123456"
-                    className="text-center text-lg tracking-[0.5em] tabular-nums"
-                    invalid={!!mfaForm.formState.errors.code}
-                    {...mfaForm.register('code')}
-                  />
-                </Field>
-                <Button type="submit" size="lg" className="w-full" loading={mfaForm.formState.isSubmitting}>
-                  Verify and sign in
-                </Button>
-                <button
-                  type="button"
-                  className="block w-full rounded-md py-1 text-center text-xs font-medium text-ink-muted transition-colors hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
-                  onClick={() => {
-                    setChallenge(null);
-                    setError(null);
-                  }}
-                >
-                  Back to sign in
-                </button>
+                  <motion.div variants={fadeRise}>
+                    <Field
+                      label="Authentication code"
+                      htmlFor="mfa-code"
+                      required
+                      error={mfaForm.formState.errors.code?.message}
+                    >
+                      <Input
+                        id="mfa-code"
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        maxLength={6}
+                        placeholder="123456"
+                        className="text-center text-lg tracking-[0.5em] tabular-nums"
+                        invalid={!!mfaForm.formState.errors.code}
+                        {...mfaForm.register('code')}
+                      />
+                    </Field>
+                  </motion.div>
+                  <motion.div variants={fadeRise}>
+                    <Button type="submit" size="lg" className="w-full" loading={mfaForm.formState.isSubmitting}>
+                      Verify and sign in
+                    </Button>
+                  </motion.div>
+                  <motion.button
+                    variants={fadeRise}
+                    type="button"
+                    className="block w-full rounded-md py-1 text-center text-xs font-medium text-ink-muted transition-colors hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
+                    onClick={() => {
+                      setChallenge(null);
+                      setError(null);
+                    }}
+                  >
+                    Back to sign in
+                  </motion.button>
+                </motion.div>
               </form>
             ) : (
               <form onSubmit={onSubmit} className="space-y-4">
-                <Field
-                  label="Email"
-                  htmlFor="email"
-                  required
-                  error={form.formState.errors.email?.message}
+                {/* Cascade the credential fields in. Anchored to mount so a re-render does not replay. */}
+                <motion.div
+                  variants={staggerContainer}
+                  initial="hidden"
+                  animate="show"
+                  className="space-y-4"
                 >
-                  <Input
-                    id="email"
-                    type="email"
-                    autoComplete="email"
-                    invalid={!!form.formState.errors.email}
-                    {...form.register('email')}
-                  />
-                </Field>
-                <Field
-                  label="Password"
-                  htmlFor="password"
-                  required
-                  error={form.formState.errors.password?.message}
-                  hint={
-                    <Link
-                      to="/password-reset/request"
-                      className="font-medium text-indigo-600 transition-colors hover:text-indigo-700"
+                  <motion.div variants={fadeRise}>
+                    <Field
+                      label="Email"
+                      htmlFor="email"
+                      required
+                      error={form.formState.errors.email?.message}
                     >
-                      Forgot?
-                    </Link>
-                  }
-                >
-                  <Input
-                    id="password"
-                    type="password"
-                    autoComplete="current-password"
-                    invalid={!!form.formState.errors.password}
-                    {...form.register('password')}
-                  />
-                </Field>
-                <Button type="submit" size="lg" className="w-full" loading={form.formState.isSubmitting}>
-                  Sign in
-                </Button>
+                      <Input
+                        id="email"
+                        type="email"
+                        autoComplete="email"
+                        invalid={!!form.formState.errors.email}
+                        {...form.register('email')}
+                      />
+                    </Field>
+                  </motion.div>
+                  <motion.div variants={fadeRise}>
+                    <Field
+                      label="Password"
+                      htmlFor="password"
+                      required
+                      error={form.formState.errors.password?.message}
+                      hint={
+                        <Link
+                          to="/password-reset/request"
+                          className="font-medium text-indigo-600 transition-colors hover:text-indigo-700"
+                        >
+                          Forgot?
+                        </Link>
+                      }
+                    >
+                      <Input
+                        id="password"
+                        type="password"
+                        autoComplete="current-password"
+                        invalid={!!form.formState.errors.password}
+                        {...form.register('password')}
+                      />
+                    </Field>
+                  </motion.div>
+                  <motion.div variants={fadeRise}>
+                    <Button type="submit" size="lg" className="w-full" loading={form.formState.isSubmitting}>
+                      Sign in
+                    </Button>
+                  </motion.div>
+                </motion.div>
               </form>
             )}
+
+            {!challenge ? (
+              <>
+                <p className="mt-6 text-center text-sm text-ink-muted">
+                  New to Keyforge?{' '}
+                  <Link
+                    to="/signup"
+                    className="font-medium text-indigo-600 transition-colors hover:text-indigo-700"
+                  >
+                    Create an account
+                  </Link>
+                </p>
+                <SsoButtons />
+              </>
+            ) : null}
           </div>
         </motion.div>
       </motion.div>

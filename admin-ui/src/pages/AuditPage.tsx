@@ -5,7 +5,7 @@ import { apiErrorMessage, audit } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Button, Card, CardBody, Field, Input } from '@/components/ui';
 import { DataTable, type Column } from '@/components/DataTable';
-import { fadeRise } from '@/lib/motion';
+import { fadeRise, staggerContainer } from '@/lib/motion';
 import type { AuditEntry } from '@/lib/types';
 
 export function AuditPage() {
@@ -82,13 +82,16 @@ export function AuditPage() {
     <div>
       <PageHeader
         title="Audit log"
-        description="Every write in the control panel produces an audit entry. Immutable, append-only."
+        description="Every write in Keyforge produces an audit entry. Immutable, append-only."
       />
 
-      <motion.div variants={fadeRise} initial="hidden" animate="show">
-        <Card className="mb-4">
-          <CardBody className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 xl:items-end">
-            <Field label="Actor" htmlFor="filter-actor">
+      {/* Page body cascade — anchored to this wrapper so a background audit
+          refetch (new query params apply on Apply only) does not replay it. */}
+      <motion.div variants={staggerContainer} initial="hidden" animate="show">
+        <motion.div variants={fadeRise}>
+          <Card className="mb-4">
+            <CardBody className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 xl:items-end">
+              <Field label="Actor" htmlFor="filter-actor">
               <Input
                 id="filter-actor"
                 placeholder="Email or ID"
@@ -131,18 +134,21 @@ export function AuditPage() {
             <Button className="w-full justify-center" onClick={() => setApplied(filters)}>
               Apply
             </Button>
-          </CardBody>
-        </Card>
-      </motion.div>
+            </CardBody>
+          </Card>
+        </motion.div>
 
-      <DataTable
-        rows={items}
-        columns={columns}
-        rowKey={(a) => a.id}
-        loading={auditQ.isLoading}
-        empty={auditQ.isError ? apiErrorMessage(auditQ.error) : 'No audit events.'}
-        pageSize={50}
-      />
+        <motion.div variants={fadeRise}>
+          <DataTable
+            rows={items}
+            columns={columns}
+            rowKey={(a) => a.id}
+            loading={auditQ.isLoading}
+            empty={auditQ.isError ? apiErrorMessage(auditQ.error) : 'No audit events.'}
+            pageSize={50}
+          />
+        </motion.div>
+      </motion.div>
     </div>
   );
 }

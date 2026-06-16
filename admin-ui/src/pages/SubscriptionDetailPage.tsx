@@ -24,7 +24,7 @@ import { DataTable, type Column } from '@/components/DataTable';
 import { PermissionGate } from '@/components/PermissionGate';
 import { useToast } from '@/lib/toast';
 import { triggerDownload } from '@/lib/download';
-import { fadeRise, staggerContainer } from '@/lib/motion';
+import { fadeRise, staggerContainer, successPop } from '@/lib/motion';
 import type { License } from '@/lib/types';
 
 export function SubscriptionDetailPage() {
@@ -46,6 +46,9 @@ export function SubscriptionDetailPage() {
   const [issueOpen, setIssueOpen] = useState(false);
   const [ttlDays, setTtlDays] = useState<string>('');
   const [confirmAction, setConfirmAction] = useState<'suspend' | 'cancel' | null>(null);
+  // Presentation-only: bumped whenever a status-changing mutation lands so the
+  // resulting Status badge re-mounts and replays a celebratory successPop.
+  const [statusPop, setStatusPop] = useState(0);
 
   const suspendMut = useMutation({
     mutationFn: () => subsApi.suspend(subId),
@@ -53,6 +56,7 @@ export function SubscriptionDetailPage() {
       qc.invalidateQueries({ queryKey: ['subscription', subId] });
       toast.success('Subscription suspended');
       setConfirmAction(null);
+      setStatusPop((n) => n + 1);
     },
     onError: (e) => toast.error(apiErrorMessage(e)),
   });
@@ -63,6 +67,7 @@ export function SubscriptionDetailPage() {
       qc.invalidateQueries({ queryKey: ['subscription', subId] });
       toast.success('Subscription cancelled');
       setConfirmAction(null);
+      setStatusPop((n) => n + 1);
     },
     onError: (e) => toast.error(apiErrorMessage(e)),
   });
@@ -221,7 +226,21 @@ export function SubscriptionDetailPage() {
                 <div className="flex items-center justify-between py-2.5 first:pt-0">
                   <dt className="text-ink-muted">Status</dt>
                   <dd>
-                    <StatusBadge status={sub.status} />
+                    {/* Celebrate only AFTER a status mutation (statusPop bumped), not on every page
+                        load — a neutral status indicator shouldn't bounce on open (transitions re-audit). */}
+                    {statusPop > 0 ? (
+                      <motion.span
+                        key={statusPop}
+                        className="inline-flex"
+                        variants={successPop}
+                        initial="hidden"
+                        animate="show"
+                      >
+                        <StatusBadge status={sub.status} />
+                      </motion.span>
+                    ) : (
+                      <StatusBadge status={sub.status} />
+                    )}
                   </dd>
                 </div>
                 <div className="flex items-center justify-between py-2.5">

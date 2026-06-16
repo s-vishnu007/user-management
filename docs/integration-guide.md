@@ -167,7 +167,7 @@ The response shape:
   "seats": 25,
   "permissions": ["export.pdf", "api.v2", "admin.users.invite"],
   "features": { "max_users": 50, "ai_assistant": true },
-  "customer": { "org_name": "Acme Corp" }
+  "customer": { "org_name": "Example Corp" }
 }
 ```
 

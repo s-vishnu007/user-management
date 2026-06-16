@@ -3,11 +3,13 @@ package com.example.cp.orgs;
 import com.example.cp.common.ApiException;
 import com.example.cp.common.AuditContext;
 import com.example.cp.common.Ids;
+import com.example.cp.common.Slugs;
 import com.example.cp.users.User;
 import com.example.cp.users.UserRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.security.SecureRandom;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
@@ -18,6 +20,9 @@ import java.util.regex.Pattern;
 public class OrgService {
 
     private static final Pattern SLUG_PATTERN = Pattern.compile("^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$");
+    /** Bound on the slug body before a uniqueness suffix is appended (the pattern allows up to 64). */
+    private static final int MAX_SLUG_BODY = 40;
+    private final SecureRandom slugRandom = new SecureRandom();
 
     private final OrganizationRepository orgRepository;
     private final OrgMemberRepository memberRepository;
@@ -61,6 +66,48 @@ public class OrgService {
         AuditContext.set("org.created");
         AuditContext.setTarget("organization", saved.getId().toString());
         return saved;
+    }
+
+    /**
+     * Creates an organization deriving a unique slug from a free-text name, adding {@code ownerUserId}
+     * as OWNER. Used by self-service signup and SSO/Google JIT, where the caller has a display name but
+     * no slug. Slug collisions are resolved with numeric then random suffixes; the {@code slug} UNIQUE
+     * constraint is the final backstop for the rare concurrent same-name race.
+     */
+    @Transactional
+    public Organization createOrgFromName(String name, UUID ownerUserId) {
+        String trimmed = name == null ? "" : name.trim();
+        if (trimmed.isBlank()) {
+            throw ApiException.badRequest("Name is required");
+        }
+        return createOrg(allocateSlug(trimmed), trimmed, ownerUserId);
+    }
+
+    private String allocateSlug(String name) {
+        String base = Slugs.slugify(name);
+        if (base.length() > MAX_SLUG_BODY) {
+            base = base.substring(0, MAX_SLUG_BODY).replaceAll("-+$", "");
+        }
+        // The slug pattern requires >= 3 chars starting/ending alphanumeric. Pad short/empty bodies.
+        if (base.length() < 3) {
+            base = base.isEmpty() ? "org" : base + "-org";
+        }
+        if (!orgRepository.existsBySlug(base)) {
+            return base;
+        }
+        for (int i = 2; i <= 9; i++) {
+            String candidate = base + "-" + i;
+            if (!orgRepository.existsBySlug(candidate)) {
+                return candidate;
+            }
+        }
+        for (int i = 0; i < 6; i++) {
+            String candidate = base + "-" + Integer.toHexString(slugRandom.nextInt(0x10000));
+            if (!orgRepository.existsBySlug(candidate)) {
+                return candidate;
+            }
+        }
+        throw ApiException.conflict("Could not allocate an organization slug; try a different name");
     }
 
     @Transactional(readOnly = true)

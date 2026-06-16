@@ -28,7 +28,7 @@ app:
   # DEV-ONLY bootstrap super-admin (see com.example.cp.auth.DevBootstrapAdmin).
   #
   # On startup, IF the users table is empty, the dev profile seeds:
-  #   * an ACTIVE organization with slug 'acme' (name from `org-name` below),
+  #   * an ACTIVE organization with slug 'keyforge-dev' (name from `org-name` below),
   #   * a super-admin user (super_admin=true, ACTIVE) with the email/password below
   #     (password is bcrypt-hashed via the shared PasswordEncoder bean), and
   #   * an OWNER org_members row linking the two.
@@ -41,7 +41,7 @@ app:
   # Env-var overrides (env wins over these YAML defaults):
   #   APP_BOOTSTRAP_ADMIN_EMAIL    -> admin login email   (default admin@example.com)
   #   APP_BOOTSTRAP_ADMIN_PASSWORD -> admin login password (default Admin123!ChangeMe)
-  #   APP_BOOTSTRAP_ORG_NAME       -> organization display name (default "Acme (dev)")
+  #   APP_BOOTSTRAP_ORG_NAME       -> organization display name (default "Keyforge (dev)")
   # Set `enabled: false` (or app.dev.bootstrap-admin.enabled=false) to disable seeding
   # while keeping the dev profile active.
   # ---------------------------------------------------------------------------
@@ -50,11 +50,15 @@ app:
       enabled: true
       email: ${APP_BOOTSTRAP_ADMIN_EMAIL:admin@example.com}
       password: ${APP_BOOTSTRAP_ADMIN_PASSWORD:Admin123!ChangeMe}
-      org-name: ${APP_BOOTSTRAP_ORG_NAME:Acme (dev)}
+      org-name: ${APP_BOOTSTRAP_ORG_NAME:Keyforge (dev)}
   auth:
     # Return the raw password-reset token in the API response so local devs can
     # complete a reset without an email server. Prod default (application.yml) is false.
     expose-reset-token: true
+    # Likewise return the raw email-verification token on register/resend so local devs can verify
+    # without an email server. Prod default (application.yml) is false — the token is emailed via the
+    # outbox 'email.verification.requested' event instead.
+    expose-verification-token: true
   cors:
     # Permissive CORS for local front-end dev servers (Vite default + alternates).
     allowed-origins: http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000

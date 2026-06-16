@@ -28,7 +28,7 @@ import {
 import { DataTable, type Column } from '@/components/DataTable';
 import { PermissionGate } from '@/components/PermissionGate';
 import { useToast } from '@/lib/toast';
-import { fadeRise } from '@/lib/motion';
+import { fadeRise, hoverLift, staggerContainer } from '@/lib/motion';
 import type { AuditEntry, OrgMember, Subscription } from '@/lib/types';
 
 const ROLES = ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'] as const;
@@ -46,78 +46,91 @@ export function OrgDetailPage() {
 
   return (
     <div>
-      <PageHeader
-        title={orgQ.data?.name ?? 'Organization'}
-        description={orgQ.data ? `Slug: ${orgQ.data.slug}` : undefined}
-        breadcrumb={
-          <Link
-            to="/orgs"
-            className="rounded-sm text-ink-muted transition-colors hover:text-indigo-700"
-          >
-            Organizations
-          </Link>
-        }
-        actions={
-          orgQ.data ? (
-            <>
-              <Link to={`/orgs/${orgId}/sso`}>
-                <Button variant="outline">SSO</Button>
+      {/* Header + tab bar compose in on navigation; anchored to this always-mounted
+          root so a background TanStack refetch does NOT replay the cascade. The per-tab
+          section below has its own (intentional) keyed entrance on tab change. */}
+      <motion.div variants={staggerContainer} initial="hidden" animate="show">
+        <motion.div variants={fadeRise}>
+          <PageHeader
+            title={orgQ.data?.name ?? 'Organization'}
+            description={orgQ.data ? `Slug: ${orgQ.data.slug}` : undefined}
+            breadcrumb={
+              <Link
+                to="/orgs"
+                className="rounded-sm text-ink-muted transition-colors hover:text-indigo-700"
+              >
+                Organizations
               </Link>
-              <Link to={`/orgs/${orgId}/api-keys`}>
-                <Button variant="outline">API keys</Button>
-              </Link>
-              <PermissionGate permission="subscription.create">
-                <Link to={`/subscriptions/new?orgId=${orgId}`}>
-                  <Button>New subscription</Button>
-                </Link>
-              </PermissionGate>
-            </>
-          ) : null
-        }
-      />
+            }
+            actions={
+              orgQ.data ? (
+                <>
+                  <Link to={`/orgs/${orgId}/sso`}>
+                    <Button variant="outline">SSO</Button>
+                  </Link>
+                  <Link to={`/orgs/${orgId}/api-keys`}>
+                    <Button variant="outline">API keys</Button>
+                  </Link>
+                  <PermissionGate permission="subscription.create">
+                    <Link to={`/subscriptions/new?orgId=${orgId}`}>
+                      <Button>New subscription</Button>
+                    </Link>
+                  </PermissionGate>
+                </>
+              ) : null
+            }
+          />
+        </motion.div>
 
-      <Tabs
-        active={tab}
-        onChange={(id) => setTab(id as typeof tab)}
-        tabs={[
-          { id: 'members', label: 'Members' },
-          { id: 'subscriptions', label: 'Subscriptions' },
-          { id: 'sso', label: 'SSO' },
-          { id: 'apiKeys', label: 'API keys' },
-          { id: 'audit', label: 'Audit' },
-        ]}
-      />
+        <motion.div variants={fadeRise}>
+          <Tabs
+            active={tab}
+            onChange={(id) => setTab(id as typeof tab)}
+            tabs={[
+              { id: 'members', label: 'Members' },
+              { id: 'subscriptions', label: 'Subscriptions' },
+              { id: 'sso', label: 'SSO' },
+              { id: 'apiKeys', label: 'API keys' },
+              { id: 'audit', label: 'Audit' },
+            ]}
+          />
+        </motion.div>
+      </motion.div>
 
       <motion.div key={tab} variants={fadeRise} initial="hidden" animate="show" className="mt-6">
         {tab === 'members' && <MembersTab orgId={orgId} />}
         {tab === 'subscriptions' && <SubscriptionsTab orgId={orgId} />}
         {tab === 'sso' && (
-          <Card>
-            <CardBody>
-              <p className="text-sm text-ink-soft">
-                Configure SAML or OIDC for this organization.
-              </p>
-              <div className="mt-4">
-                <Link to={`/orgs/${orgId}/sso`}>
-                  <Button>Open SSO settings</Button>
-                </Link>
-              </div>
-            </CardBody>
-          </Card>
+          <motion.div {...hoverLift}>
+            <Card>
+              <CardBody>
+                <p className="text-sm text-ink-soft">
+                  Configure SAML or OIDC for this organization.
+                </p>
+                <div className="mt-4">
+                  <Link to={`/orgs/${orgId}/sso`}>
+                    <Button>Open SSO settings</Button>
+                  </Link>
+                </div>
+              </CardBody>
+            </Card>
+          </motion.div>
         )}
         {tab === 'apiKeys' && (
-          <Card>
-            <CardBody>
-              <p className="text-sm text-ink-soft">
-                Manage API keys for programmatic control plane access.
-              </p>
-              <div className="mt-4">
-                <Link to={`/orgs/${orgId}/api-keys`}>
-                  <Button>Open API keys</Button>
-                </Link>
-              </div>
-            </CardBody>
-          </Card>
+          <motion.div {...hoverLift}>
+            <Card>
+              <CardBody>
+                <p className="text-sm text-ink-soft">
+                  Manage API keys for programmatic control plane access.
+                </p>
+                <div className="mt-4">
+                  <Link to={`/orgs/${orgId}/api-keys`}>
+                    <Button>Open API keys</Button>
+                  </Link>
+                </div>
+              </CardBody>
+            </Card>
+          </motion.div>
         )}
         {tab === 'audit' && <OrgAuditTab orgId={orgId} />}
       </motion.div>

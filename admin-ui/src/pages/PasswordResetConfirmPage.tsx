@@ -53,7 +53,7 @@ export function PasswordResetConfirmPage() {
           <CardBody className="p-8 sm:p-10">
             <div className="mb-6 text-center">
               <div className="mx-auto mb-4 grid h-11 w-11 place-items-center rounded-xl bg-aurora-primary text-base font-bold text-white shadow-glow">
-                CP
+                KF
               </div>
               <h1 className="font-display text-2xl font-semibold tracking-tight text-ink">
                 Choose a new password

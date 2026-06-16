@@ -20,8 +20,16 @@ export {
   staggerContainer,
   pageTransition,
   hoverLift,
+  hoverLiftBold,
   overlayPanel,
   overlayBackdrop,
+  dialogPanel,
+  dialogContent,
+  dialogItem,
+  tableStagger,
+  tableRow,
+  successPop,
+  chartReveal,
 } from '@/styles/motion';
 
 import type { Variants } from 'framer-motion';

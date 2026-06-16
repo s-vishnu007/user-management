@@ -383,7 +383,7 @@ Two anti-patterns are explicitly designed out:
 The download wraps the JWT in the `.lic` envelope (`LicenseFileBuilder`):
 
 ```json
-{ "license": "<compact EdDSA JWS>", "issued_at": "...", "customer": "Acme",
+{ "license": "<compact EdDSA JWS>", "issued_at": "...", "customer": "Example",
   "plan": "pro", "expires_at": "...", "notes": "Drop this file at /etc/app/license.lic." }
 ```
 

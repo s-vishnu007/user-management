@@ -12,6 +12,8 @@ export interface User {
   fullName?: string;
   status?: 'ACTIVE' | 'DISABLED' | 'INVITED';
   superAdmin?: boolean;
+  /** Whether the user has confirmed their email. Self-service signups start false (non-blocking). */
+  emailVerified?: boolean;
   createdAt?: string;
   lastLoginAt?: string;
 }
@@ -53,6 +55,38 @@ export interface MeResponse {
   user: User;
   orgs: OrgMembership[];
   permissions: string[];
+}
+
+/**
+ * Raw {@code POST /auth/register} response. The backend auto-logs-in by setting the {@code
+ * cp_session} cookie, so the SPA bootstraps identity via {@code /me} just like login. In dev
+ * (app.auth.expose-verification-token=true) the raw {@code verificationToken} is returned so a
+ * developer can verify without an email server; in prod it is omitted (emailed via the outbox).
+ */
+export interface RegisterResponse {
+  accessToken?: string;
+  expiresAt?: string;
+  user?: User;
+  orgSlug: string;
+  emailVerificationSent: boolean;
+  verificationToken?: string;
+}
+
+/** A login-screen-visible SSO provider for an org (secrets-free). */
+export interface SsoProviderSummary {
+  id: string;
+  type: SsoType;
+  label: string;
+}
+
+/**
+ * Public SSO discovery for the login/signup screen: which per-org providers are available for a
+ * given org slug, plus whether the global "Continue with Google" button is configured.
+ */
+export interface SsoDiscovery {
+  orgSlug?: string;
+  providers: SsoProviderSummary[];
+  googleEnabled: boolean;
 }
 
 export interface Organization {

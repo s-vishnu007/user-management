@@ -7,7 +7,7 @@ import { auth } from '@/lib/api';
 import { apiErrorMessage } from '@/lib/api';
 import { Button, Card, CardBody, Field, Input } from '@/components/ui';
 import { motion } from 'framer-motion';
-import { fadeRise, DURATION, EASE } from '@/lib/motion';
+import { fadeRise, successPop, DURATION, EASE } from '@/lib/motion';
 
 const schema = z.object({ email: z.string().email() });
 type Values = z.infer<typeof schema>;
@@ -39,7 +39,7 @@ export function PasswordResetRequestPage() {
           <CardBody className="p-8 sm:p-10">
             <div className="mb-6 text-center">
               <div className="mx-auto mb-4 grid h-11 w-11 place-items-center rounded-xl bg-aurora-primary text-base font-bold text-white shadow-glow">
-                CP
+                KF
               </div>
               <h1 className="font-display text-2xl font-semibold tracking-tight text-ink">
                 Reset your password
@@ -56,9 +56,17 @@ export function PasswordResetRequestPage() {
                 role="status"
                 className="flex items-start gap-3 rounded-xl border border-success-200 bg-success-50/70 px-3.5 py-3 text-sm text-success-700"
               >
-                <svg viewBox="0 0 20 20" className="mt-0.5 h-4 w-4 shrink-0 fill-success-600" aria-hidden="true">
+                {/* Small bouncy accent on the confirmation check. */}
+                <motion.svg
+                  variants={successPop}
+                  initial="hidden"
+                  animate="show"
+                  viewBox="0 0 20 20"
+                  className="mt-0.5 h-4 w-4 shrink-0 fill-success-600"
+                  aria-hidden="true"
+                >
                   <path d="M10 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16Zm-1-5.6 5-5L12.6 6 9 9.6 7.4 8 6 9.4z" />
-                </svg>
+                </motion.svg>
                 <span>If an account exists for that email, a reset link has been sent.</span>
               </motion.div>
             ) : (

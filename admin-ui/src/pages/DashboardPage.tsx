@@ -6,7 +6,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { Card, CardBody, CardHeader } from '@/components/ui';
 import { useAuth } from '@/lib/auth';
 import { cn } from '@/lib/cn';
-import { fadeRise, hoverLift, staggerContainer } from '@/lib/motion';
+import { chartReveal, fadeRise, hoverLiftBold, staggerContainer } from '@/lib/motion';
 import { useMemo, type ReactNode } from 'react';
 import {
   Area,
@@ -37,7 +37,7 @@ function Stat({
   accent: string;
 }) {
   return (
-    <motion.div variants={fadeRise} {...hoverLift} className="h-full">
+    <motion.div variants={fadeRise} {...hoverLiftBold} className="h-full">
       {/* KPI cards use a near-opaque solid fill with NO backdrop-filter so the dense
           4-up grid doesn't stack 4 live blur surfaces over the drifting aurora mesh
           (design-system rule: cap overlapping backdrop-filter at ~2/region). Blur is
@@ -226,7 +226,7 @@ export function DashboardPage() {
               aria-hidden
               className="pulse-ring h-1.5 w-1.5 rounded-full bg-success-500"
             />
-            Live control panel
+            Live dashboard
           </span>
         }
       />
@@ -274,7 +274,7 @@ export function DashboardPage() {
         animate="show"
         className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3"
       >
-        <motion.div variants={fadeRise} className="lg:col-span-2">
+        <motion.div variants={chartReveal} className="lg:col-span-2">
           <Card className="h-full overflow-hidden">
             <CardHeader
               title="Licenses issued"

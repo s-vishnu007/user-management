@@ -1,17 +1,22 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
+import { motion } from 'framer-motion';
 import { apiErrorMessage, keys } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Button, Dialog, StatusBadge } from '@/components/ui';
 import { DataTable, type Column } from '@/components/DataTable';
 import { PermissionGate } from '@/components/PermissionGate';
 import { useToast } from '@/lib/toast';
+import { fadeRise, successPop } from '@/lib/motion';
 import type { SigningKey } from '@/lib/types';
 
 export function KeysPage() {
   const qc = useQueryClient();
   const toast = useToast();
   const [confirmOpen, setConfirmOpen] = useState(false);
+  // The kid of the key produced by the most recent rotation in this session, so its
+  // ACTIVE badge can celebrate with a one-shot successPop (presentation-only).
+  const [justRotatedKid, setJustRotatedKid] = useState<string | null>(null);
 
   const keysQ = useQuery({ queryKey: ['keys'], queryFn: keys.list });
 
@@ -20,6 +25,7 @@ export function KeysPage() {
     onSuccess: (k) => {
       qc.invalidateQueries({ queryKey: ['keys'] });
       setConfirmOpen(false);
+      setJustRotatedKid(k.kid);
       toast.success(`New active key: ${k.kid}`);
     },
     onError: (e) => toast.error(apiErrorMessage(e)),
@@ -43,7 +49,21 @@ export function KeysPage() {
     {
       key: 'status',
       header: 'Status',
-      render: (k) => <StatusBadge status={k.status} />,
+      render: (k) =>
+        // Celebrate the key that was just rotated into ACTIVE with a one-shot pop;
+        // every other badge renders exactly as before (no motion wrapper).
+        k.kid === justRotatedKid ? (
+          <motion.span
+            className="inline-flex"
+            variants={successPop}
+            initial="hidden"
+            animate="show"
+          >
+            <StatusBadge status={k.status} />
+          </motion.span>
+        ) : (
+          <StatusBadge status={k.status} />
+        ),
     },
     {
       key: 'created',
@@ -94,13 +114,15 @@ export function KeysPage() {
         }
       />
 
-      <DataTable
-        rows={keysQ.data}
-        columns={columns}
-        rowKey={(k) => k.kid}
-        loading={keysQ.isLoading}
-        empty={keysQ.isError ? apiErrorMessage(keysQ.error) : 'No signing keys.'}
-      />
+      <motion.div variants={fadeRise} initial="hidden" animate="show">
+        <DataTable
+          rows={keysQ.data}
+          columns={columns}
+          rowKey={(k) => k.kid}
+          loading={keysQ.isLoading}
+          empty={keysQ.isError ? apiErrorMessage(keysQ.error) : 'No signing keys.'}
+        />
+      </motion.div>
 
       <Dialog
         open={confirmOpen}

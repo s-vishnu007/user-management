@@ -40,6 +40,9 @@ public class UserService {
             throw ApiException.badRequest("Email is required");
         }
         passwordPolicy.validate(password);
+        // Hash BEFORE the existence check so a duplicate-email request pays the same bcrypt cost as a
+        // fresh signup — removes the fast-return timing oracle for account enumeration (re-audit #8).
+        String passwordHash = passwordEncoder.encode(password);
         if (userRepository.existsByEmail(email)) {
             throw ApiException.conflict("A user with that email already exists");
         }
@@ -48,7 +51,7 @@ public class UserService {
                 .id(Ids.newId())
                 .email(email)
                 .fullName(fullName)
-                .passwordHash(passwordEncoder.encode(password))
+                .passwordHash(passwordHash)
                 .status(User.Status.ACTIVE)
                 .superAdmin(false)
                 .createdAt(OffsetDateTime.now())

@@ -1,6 +1,6 @@
 # Aurora Glass — Design System
 
-A luminous, premium, **light-mode** design language for the Control Panel admin SPA: frosted-glass panels over a soft aurora gradient-mesh backdrop, layered soft shadows for depth, vivid indigo → violet → cyan accents, and fluid, tasteful CSS/framer micro-animations.
+A luminous, premium, **light-mode** design language for the Keyforge admin SPA: frosted-glass panels over a soft aurora gradient-mesh backdrop, layered soft shadows for depth, vivid indigo → violet → cyan accents, and fluid, tasteful CSS/framer micro-animations.
 
 > Single source of truth. Tokens live in `tailwind.config.ts`; surfaces, the aurora backdrop, focus rings and accessibility gates live in `src/index.css`; motion variants live in `src/styles/motion.ts`. Apply via `className` + the shared helpers — never edit `lib/*` or `routes.tsx`.
 

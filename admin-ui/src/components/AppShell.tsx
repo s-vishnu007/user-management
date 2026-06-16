@@ -3,8 +3,8 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useAuth } from '@/lib/auth';
 import { cn } from '@/lib/cn';
-import { pageTransition } from '@/styles/motion';
 import { Button } from './ui/Button';
+import { EmailVerificationBanner } from './EmailVerificationBanner';
 
 interface NavItem {
   to: string;
@@ -125,9 +125,9 @@ export function AppShell() {
       <aside className="hidden md:flex md:w-64 md:flex-col glass-nav border-r border-white/60">
         <div className="flex h-14 items-center gap-2.5 border-b border-white/50 px-5">
           <div className="grid h-8 w-8 place-items-center rounded-lg bg-aurora-primary text-sm font-bold text-white shadow-glow">
-            CP
+            KF
           </div>
-          <span className="font-display font-semibold tracking-tight text-ink">Control Panel</span>
+          <span className="font-display font-semibold tracking-tight text-ink">Keyforge</span>
         </div>
         <nav className="flex-1 space-y-1 p-3" aria-label="Primary">
           {visibleNav.map((n) => (
@@ -201,9 +201,9 @@ export function AppShell() {
               </svg>
             </button>
             <div className="grid h-7 w-7 place-items-center rounded-lg bg-aurora-primary text-xs font-bold text-white shadow-glow">
-              CP
+              KF
             </div>
-            <span className="font-display font-semibold tracking-tight text-ink">Control Panel</span>
+            <span className="font-display font-semibold tracking-tight text-ink">Keyforge</span>
           </div>
           <div className="ml-auto flex items-center gap-3">
             <span className="hidden items-center gap-2 text-sm text-ink-muted md:inline-flex">
@@ -249,10 +249,10 @@ export function AppShell() {
                 <div className="flex h-14 items-center justify-between border-b border-white/50 px-4">
                   <div className="flex items-center gap-2.5">
                     <div className="grid h-8 w-8 place-items-center rounded-lg bg-aurora-primary text-sm font-bold text-white shadow-glow">
-                      CP
+                      KF
                     </div>
                     <span className="font-display font-semibold tracking-tight text-ink">
-                      Control Panel
+                      Keyforge
                     </span>
                   </div>
                   <button
@@ -328,17 +328,11 @@ export function AppShell() {
         </AnimatePresence>
 
         <main className="flex-1 px-5 py-6 md:px-8 md:py-8">
-          <AnimatePresence mode="wait" initial={false}>
-            <motion.div
-              key={location.pathname}
-              initial={pageTransition.initial}
-              animate={pageTransition.animate}
-              exit={pageTransition.exit}
-              transition={pageTransition.transition}
-            >
-              <Outlet />
-            </motion.div>
-          </AnimatePresence>
+          <EmailVerificationBanner />
+          {/* No route-level transition: each page reveals with its OWN single content entrance.
+              Layering a whole-page route transition on top of that produced a double
+              "page loads, then the content loads" effect. One motion per page. */}
+          <Outlet />
         </main>
       </div>
     </div>

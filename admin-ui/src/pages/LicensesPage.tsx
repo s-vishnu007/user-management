@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
+import { motion } from 'framer-motion';
 import { apiErrorMessage, licenses, orgs, subscriptions } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Button, Card, CardBody, Field, Input, Select, StatusBadge } from '@/components/ui';
@@ -8,6 +9,7 @@ import { DataTable, type Column } from '@/components/DataTable';
 import { PermissionGate } from '@/components/PermissionGate';
 import { useToast } from '@/lib/toast';
 import { triggerDownload } from '@/lib/download';
+import { fadeRise, staggerContainer } from '@/lib/motion';
 import type { License } from '@/lib/types';
 
 type StatusFilter = 'all' | 'active' | 'expired' | 'revoked';
@@ -174,74 +176,83 @@ export function LicensesPage() {
         description="Issued license tokens, scoped to a subscription."
       />
 
-      {/* Scope picker — the org→subscription drill-down promoted into its own
-          glass panel so the workspace reads as a deliberate two-step flow. */}
-      <Card className="mb-6 motion-safe:animate-fade-up">
-        <CardBody className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <Field label="Organization" htmlFor="lic-org">
-            <Select
-              id="lic-org"
-              value={orgId}
-              onChange={(e) => setOrgId(e.target.value)}
-              disabled={orgsQ.isLoading}
-            >
-              <option value="">Select organization…</option>
-              {(orgsQ.data ?? []).map((o) => (
-                <option key={o.id} value={o.id}>
-                  {o.name} ({o.slug})
-                </option>
-              ))}
-            </Select>
-          </Field>
-          <Field
-            label="Subscription"
-            htmlFor="lic-sub"
-            hint={orgId ? undefined : 'Pick an organization first'}
-          >
-            <Select
-              id="lic-sub"
-              value={subId}
-              onChange={(e) => setSubId(e.target.value)}
-              disabled={!orgId || subsQ.isLoading}
-            >
-              <option value="">Select subscription…</option>
-              {(subsQ.data ?? []).map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.planName ?? s.planCode ?? s.planId} · {s.status}
-                </option>
-              ))}
-            </Select>
-          </Field>
-        </CardBody>
-      </Card>
+      {/* Page body: choreograph the scope picker + results table in with a gentle
+          stagger. Anchored to this wrapper (kept mounted across query refetches),
+          so background license refetches do NOT replay the entrance cascade. */}
+      <motion.div variants={staggerContainer} initial="hidden" animate="show">
+        {/* Scope picker — the org→subscription drill-down promoted into its own
+            glass panel so the workspace reads as a deliberate two-step flow. */}
+        <motion.div variants={fadeRise}>
+          <Card className="mb-6">
+            <CardBody className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Field label="Organization" htmlFor="lic-org">
+                <Select
+                  id="lic-org"
+                  value={orgId}
+                  onChange={(e) => setOrgId(e.target.value)}
+                  disabled={orgsQ.isLoading}
+                >
+                  <option value="">Select organization…</option>
+                  {(orgsQ.data ?? []).map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.name} ({o.slug})
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field
+                label="Subscription"
+                htmlFor="lic-sub"
+                hint={orgId ? undefined : 'Pick an organization first'}
+              >
+                <Select
+                  id="lic-sub"
+                  value={subId}
+                  onChange={(e) => setSubId(e.target.value)}
+                  disabled={!orgId || subsQ.isLoading}
+                >
+                  <option value="">Select subscription…</option>
+                  {(subsQ.data ?? []).map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.planName ?? s.planCode ?? s.planId} · {s.status}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </CardBody>
+          </Card>
+        </motion.div>
 
-      <DataTable
-        rows={subId ? data : []}
-        columns={columns}
-        rowKey={(l) => l.jti}
-        loading={!!subId && licsQ.isLoading}
-        empty={emptyMessage}
-        toolbar={
-          <div className="flex w-full flex-wrap items-center gap-2">
-            <Input
-              placeholder="Search by JTI or key"
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              className="max-w-sm"
-            />
-            <Select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-              className="max-w-xs"
-            >
-              <option value="all">All statuses</option>
-              <option value="active">Active</option>
-              <option value="expired">Expired</option>
-              <option value="revoked">Revoked</option>
-            </Select>
-          </div>
-        }
-      />
+        <motion.div variants={fadeRise}>
+          <DataTable
+            rows={subId ? data : []}
+            columns={columns}
+            rowKey={(l) => l.jti}
+            loading={!!subId && licsQ.isLoading}
+            empty={emptyMessage}
+            toolbar={
+              <div className="flex w-full flex-wrap items-center gap-2">
+                <Input
+                  placeholder="Search by JTI or key"
+                  value={filter}
+                  onChange={(e) => setFilter(e.target.value)}
+                  className="max-w-sm"
+                />
+                <Select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+                  className="max-w-xs"
+                >
+                  <option value="all">All statuses</option>
+                  <option value="active">Active</option>
+                  <option value="expired">Expired</option>
+                  <option value="revoked">Revoked</option>
+                </Select>
+              </div>
+            }
+          />
+        </motion.div>
+      </motion.div>
     </div>
   );
 }

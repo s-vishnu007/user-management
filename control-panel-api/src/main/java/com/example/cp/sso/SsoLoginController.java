@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.view.RedirectView;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @RestController
@@ -21,6 +22,10 @@ public class SsoLoginController {
 
     @Value("${app.ui.base-url:http://localhost:5173}")
     private String uiBaseUrl;
+
+    /** Mirrors {@code SsoSecurityConfig}: blank => the global Google button is hidden / disabled. */
+    @Value("${app.sso.google.client-id:}")
+    private String googleClientId;
 
     public SsoLoginController(OrganizationRepository orgRepo, SsoProviderRepository providerRepo) {
         this.orgRepo = orgRepo;
@@ -50,4 +55,50 @@ public class SsoLoginController {
                 : "/saml2/authenticate/" + registrationId;
         return new RedirectView(target);
     }
+
+    /**
+     * Public discovery for the login screen. {@code q} is a work email or org slug; we resolve the org
+     * by slug and return its enabled providers (id + type + label) plus the global Google flag. The SPA
+     * builds the start URLs itself from {@code orgSlug}+provider id (see {@code auth.ssoStartUrl}). An
+     * unknown org / no providers simply yields an empty list — it does not distinguish "no such org"
+     * from "no SSO", to avoid org-enumeration via this endpoint.
+     */
+    @GetMapping("/discovery")
+    public DiscoveryResponse discovery(@RequestParam(required = false) String q) {
+        List<ProviderInfo> providers = new ArrayList<>();
+        String resolvedSlug = null;
+        if (q != null && !q.isBlank()) {
+            // Accept either an org slug or a work email; the part after '@' is not a slug, so only the
+            // bare-slug form resolves a provider list. (Domain->org mapping is intentionally omitted.)
+            String slug = q.trim();
+            var found = orgRepo.findBySlug(slug);
+            if (found.isPresent()) {
+                resolvedSlug = found.get().getSlug();
+                for (SsoProvider p : providerRepo.findByOrgId(found.get().getId())) {
+                    if (!p.isEnabled()) {
+                        continue;
+                    }
+                    String label = p.getType() == SsoProvider.Type.OIDC
+                            ? "Single sign-on (OIDC)"
+                            : "Single sign-on (SAML)";
+                    providers.add(new ProviderInfo(p.getId().toString(), p.getType().name(), label));
+                }
+            }
+        }
+        boolean googleEnabled = googleClientId != null && !googleClientId.isBlank();
+        return new DiscoveryResponse(resolvedSlug, providers, googleEnabled);
+    }
+
+    /** Kicks off the global Google OIDC flow. 404 when Google credentials are not configured. */
+    @GetMapping("/google/start")
+    public RedirectView googleStart() {
+        if (googleClientId == null || googleClientId.isBlank()) {
+            throw ApiException.notFound("Google sign-in is not configured");
+        }
+        return new RedirectView("/oauth2/authorization/google");
+    }
+
+    public record DiscoveryResponse(String orgSlug, List<ProviderInfo> providers, boolean googleEnabled) {}
+
+    public record ProviderInfo(String id, String type, String label) {}
 }

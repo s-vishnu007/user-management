@@ -7,7 +7,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { Button, Card, CardBody, CardHeader, Field, Input, PageLoader, Select, StatusBadge } from '@/components/ui';
 import { useToast } from '@/lib/toast';
 import { triggerDownload } from '@/lib/download';
-import { DURATION, EASE } from '@/lib/motion';
+import { DURATION, EASE, successPop } from '@/lib/motion';
 import { cn } from '@/lib/cn';
 import type { SubscriptionOverride } from '@/lib/types';
 
@@ -453,7 +453,26 @@ export function SubscriptionCreateWizard() {
 
           {step === 4 && (
             <div>
-              <h3 className="mb-3 text-sm font-semibold text-ink">Confirm</h3>
+              <div className="mb-3 flex items-center gap-2">
+                <motion.span
+                  aria-hidden="true"
+                  variants={successPop}
+                  initial="hidden"
+                  animate="show"
+                  className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-success-500 text-white shadow-glow"
+                >
+                  <svg viewBox="0 0 20 20" fill="none" className="h-3.5 w-3.5">
+                    <path
+                      d="m5 10.5 3 3 7-7"
+                      stroke="currentColor"
+                      strokeWidth="2.4"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </motion.span>
+                <h3 className="text-sm font-semibold text-ink">Confirm</h3>
+              </div>
               <Card>
                 <CardHeader title="Summary" />
                 <CardBody>

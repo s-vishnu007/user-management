@@ -1,6 +1,11 @@
 import { type ReactNode, useMemo, useState } from 'react';
-import { Table, THead, TBody, TR, TH, TD, EmptyState } from './ui/Table';
+import { motion } from 'framer-motion';
+import { Table, THead, TBody, TH, TD, EmptyState } from './ui/Table';
 import { Button } from './ui/Button';
+import { DURATION, EASE } from '@/lib/motion';
+
+/** Cap the row cascade so dense tables don't take ~2s to settle: rows past this index snap in. */
+const ROW_CASCADE_CAP = 10;
 
 export interface Column<T> {
   key: string;
@@ -56,10 +61,11 @@ export function DataTable<T>({
             ))}
           </tr>
         </THead>
-        <TBody>
-          {loading ? (
-            // Skeleton rows sized to the real layout — preserves the loading branch.
-            Array.from({ length: 5 }).map((_, r) => (
+        {loading ? (
+          // Skeleton rows sized to the real layout — preserves the loading branch.
+          // No entrance animation on the skeleton (per cascade-on-loaded-only rule).
+          <TBody>
+            {Array.from({ length: 5 }).map((_, r) => (
               <tr key={`sk-${r}`}>
                 {columns.map((c) => (
                   <TD key={c.key} className={c.className}>
@@ -67,24 +73,46 @@ export function DataTable<T>({
                   </TD>
                 ))}
               </tr>
-            ))
-          ) : slice.length === 0 ? (
+            ))}
+          </TBody>
+        ) : slice.length === 0 ? (
+          // Empty-state row — left un-animated as required.
+          <TBody>
             <tr>
               <td colSpan={columns.length}>
                 <EmptyState>{empty ?? 'No results.'}</EmptyState>
               </td>
             </tr>
-          ) : (
-            slice.map((row) => (
-              <TR
+          </TBody>
+        ) : (
+          // Loaded branch: cascade rows in. We render motion.tbody / motion.tr
+          // directly (TBody/TR don't forward refs) carrying the SAME classes the
+          // styled TBody/TR apply, so styling is identical. The container stays
+          // mounted across the loading→loaded transition and across background
+          // refetches, and variants only fire on mount — so a same-data refetch
+          // (rows keep their rowKey) does NOT replay. New rows on page change
+          // mount and cascade in, which is the desired effect.
+          <TBody>
+            {slice.map((row, i) => (
+              <motion.tr
                 key={rowKey(row)}
-                // When the whole row is the action, expose it to keyboard + AT:
-                // focusable, button semantics, Enter/Space activation, and a
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{
+                  duration: DURATION.base,
+                  ease: EASE.out,
+                  // Capped cascade: the first ROW_CASCADE_CAP rows tumble in, the rest snap in
+                  // together — keeps a dense table's cascade deliberate but bounded.
+                  delay: Math.min(i, ROW_CASCADE_CAP) * 0.05,
+                }}
+                // Same base TR styling (transition-colors hover:bg-indigo-50/40)
+                // plus, when the whole row is the action, expose it to keyboard +
+                // AT: focusable, button semantics, Enter/Space activation, and a
                 // visible focus style. Purely additive — onRowClick is unchanged.
                 className={
                   onRowClick
-                    ? 'cursor-pointer focus:outline-none focus-visible:bg-indigo-50/70 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500'
-                    : undefined
+                    ? 'transition-colors hover:bg-indigo-50/40 cursor-pointer focus:outline-none focus-visible:bg-indigo-50/70 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500'
+                    : 'transition-colors hover:bg-indigo-50/40'
                 }
                 onClick={onRowClick ? () => onRowClick(row) : undefined}
                 role={onRowClick ? 'button' : undefined}
@@ -106,10 +134,10 @@ export function DataTable<T>({
                     {c.render(row)}
                   </TD>
                 ))}
-              </TR>
-            ))
-          )}
-        </TBody>
+              </motion.tr>
+            ))}
+          </TBody>
+        )}
       </Table>
       {data.length > pageSize ? (
         <div className="flex items-center justify-between border-t border-slate-900/5 px-4 py-3 text-xs text-ink-muted">

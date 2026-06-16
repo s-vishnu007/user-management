@@ -16,7 +16,7 @@ describe('auth.me — unified {user, permissions, orgs} contract', () => {
         status: 'ACTIVE',
         superAdmin: true,
       },
-      orgs: [{ orgId: 'o1', slug: 'acme', name: 'Acme', role: 'OWNER' }],
+      orgs: [{ orgId: 'o1', slug: 'example', name: 'Example', role: 'OWNER' }],
       permissions: ['SUPER_ADMIN', 'org.read', 'plan.write'],
     };
     vi.spyOn(http, 'get').mockResolvedValue({ data: me, headers: {} });
@@ -26,7 +26,7 @@ describe('auth.me — unified {user, permissions, orgs} contract', () => {
     // The permission set is the flat authority list from the envelope.
     expect(id.permissions).toContain('plan.write');
     expect(id.permissions).toContain('SUPER_ADMIN');
-    expect(id.orgs[0].slug).toBe('acme');
+    expect(id.orgs[0].slug).toBe('example');
   });
 
   it('defaults permissions/orgs to empty arrays when absent', async () => {

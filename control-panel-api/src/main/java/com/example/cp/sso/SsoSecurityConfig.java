@@ -34,6 +34,13 @@ public class SsoSecurityConfig {
     @Value("${app.sso.base-url:http://localhost:8080}")
     private String baseUrl;
 
+    /** Global "Continue with Google" credentials. Blank => the Google button is disabled. */
+    @Value("${app.sso.google.client-id:}")
+    private String googleClientId;
+
+    @Value("${app.sso.google.client-secret:}")
+    private String googleClientSecret;
+
     public SsoSecurityConfig(SsoProviderRepository providerRepo) {
         this.providerRepo = providerRepo;
     }
@@ -72,6 +79,26 @@ public class SsoSecurityConfig {
             }
         } catch (Exception e) {
             log.warn("Failed to bootstrap OIDC client registrations: {}", e.getMessage());
+        }
+        // Optional global "Continue with Google" provider (org-less). Registered only when credentials
+        // are supplied via app.sso.google.client-id/secret; otherwise the button is hidden by the
+        // discovery endpoint and /sso/google/start returns 404.
+        if (googleClientId != null && !googleClientId.isBlank()) {
+            registrations.add(ClientRegistration.withRegistrationId("google")
+                    .clientId(googleClientId)
+                    .clientSecret(googleClientSecret)
+                    .clientAuthenticationMethod(ClientAuthenticationMethod.CLIENT_SECRET_BASIC)
+                    .authorizationGrantType(AuthorizationGrantType.AUTHORIZATION_CODE)
+                    .redirectUri(baseUrl + "/login/oauth2/code/{registrationId}")
+                    .scope("openid", "profile", "email")
+                    .userNameAttributeName("sub")
+                    .issuerUri("https://accounts.google.com")
+                    .authorizationUri("https://accounts.google.com/o/oauth2/v2/auth")
+                    .tokenUri("https://oauth2.googleapis.com/token")
+                    .userInfoUri("https://openidconnect.googleapis.com/v1/userinfo")
+                    .jwkSetUri("https://www.googleapis.com/oauth2/v3/certs")
+                    .clientName("Google")
+                    .build());
         }
         if (registrations.isEmpty()) {
             registrations.add(ClientRegistration.withRegistrationId("placeholder")

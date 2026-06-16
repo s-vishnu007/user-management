@@ -11,8 +11,11 @@ export function PageHeader({
   actions?: ReactNode;
   breadcrumb?: ReactNode;
 }) {
+  // No built-in entrance here: the route transition (AppShell) animates the whole page in, and pages
+  // that wrap the header in a fadeRise stagger drive it from there. Having both produced a double
+  // Y-drift on the header (transitions re-audit). One entrance per element.
   return (
-    <div className="mb-6 motion-safe:animate-fade-up">
+    <div className="mb-6">
       {breadcrumb ? (
         <div className="mb-2 text-xs font-medium text-ink-muted">{breadcrumb}</div>
       ) : null}

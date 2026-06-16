@@ -3,7 +3,9 @@ package com.example.cp.sso;
 import com.example.cp.audit.AuditWriter;
 import com.example.cp.auth.SessionTokenService;
 import com.example.cp.common.TrustedProxyResolver;
+import com.example.cp.mfa.MfaService;
 import com.example.cp.orgs.OrgMemberRepository;
+import com.example.cp.orgs.OrgService;
 import com.example.cp.rbac.AuthoritiesLoader;
 import com.example.cp.users.User;
 import com.example.cp.users.UserRepository;
@@ -55,6 +57,8 @@ class SsoSuccessHandlerTest {
     private TrustedProxyResolver proxyResolver;
     private SessionTokenService tokenService;
     private AuthoritiesLoader authoritiesLoader;
+    private OrgService orgService;
+    private MfaService mfaService;
     private SsoProvisioningService provisioningService;
     private SsoSuccessHandler handler;
 
@@ -68,6 +72,8 @@ class SsoSuccessHandlerTest {
         proxyResolver = mock(TrustedProxyResolver.class);
         tokenService = new SessionTokenService(SECRET, Duration.ofMinutes(30));
         authoritiesLoader = mock(AuthoritiesLoader.class);
+        orgService = mock(OrgService.class);
+        mfaService = mock(MfaService.class);
 
         when(proxyResolver.resolveClientIp(any())).thenReturn("203.0.113.9");
         when(authoritiesLoader.authoritiesFor(any(), any(), eq(false))).thenReturn(Set.of("sub.read"));
@@ -76,7 +82,7 @@ class SsoSuccessHandlerTest {
         // The JIT user/identity/membership writes now live in a @Transactional SsoProvisioningService;
         // wire a real instance over the same mocks so the handler's gating + the provisioning behaviour
         // are both exercised end-to-end (the @Transactional boundary is a no-op without a tx manager).
-        provisioningService = new SsoProvisioningService(userRepo, memberRepo, identityRepo, auditWriter);
+        provisioningService = new SsoProvisioningService(userRepo, memberRepo, identityRepo, auditWriter, orgService, mfaService);
 
         handler = new SsoSuccessHandler(providerRepo, identityRepo, provisioningService,
                 auditWriter, proxyResolver, tokenService, authoritiesLoader);

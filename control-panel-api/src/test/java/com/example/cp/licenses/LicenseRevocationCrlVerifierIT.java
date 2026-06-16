@@ -76,7 +76,7 @@ class LicenseRevocationCrlVerifierIT extends AbstractIntegrationTest {
     @Test
     void issue_revoke_crl_flow_and_verifierRejectsRevokedAndMissingExp() throws Exception {
         // --- seed tenant + ACTIVE subscription on a fresh plan with a generous TTL ---
-        Organization org = seedOrg("Acme " + rnd());
+        Organization org = seedOrg("Example " + rnd());
         Plan plan = seedNewPlan("crlplan-" + rnd(), 365);
         Subscription sub = seedSubscription(org.getId(), plan.getId());
 
