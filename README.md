@@ -6,7 +6,7 @@
 
 It is built for software vendors who ship on-prem / in-customer-cloud and need the licensing guarantees of a phone-home SaaS (entitlements, seat counts, expiry, revocation) **without** requiring the customer's deployment to call home at request time.
 
-> **Status: BETA.** The system went through a full security audit (2026-06-01, verdict *ALPHA*) and a complete remediation + re-audit (2026-06-13, verdict *BETA*). **430 tests pass** (`mvn clean verify`). See [Testing & quality](#testing--quality) and [`AUDIT.md`](AUDIT.md) / [`AUDIT-undated.md`](AUDIT-undated.md) for the full history. *Not yet hardened for fully untrusted-tenant production; intended for controlled / closed-beta multi-tenant use.*
+> **Status: BETA.** The system went through a full security audit (2026-06-01, verdict *ALPHA*) and a complete remediation + re-audit (2026-06-13, verdict *BETA*). Self-service signup, email verification, and Google sign-in were since added and hardened against a follow-up adversarial re-audit. **444 tests pass** (`mvn clean verify`). See [Testing & quality](#testing--quality) and [`AUDIT.md`](AUDIT.md) / [`AUDIT-undated.md`](AUDIT-undated.md) for the full history. *Not yet hardened for fully untrusted-tenant production; intended for controlled / closed-beta multi-tenant use.*
 
 ---
 
@@ -16,11 +16,12 @@ The two halves of the system **never share a database**. The only contract betwe
 
 **Control plane (the panel)**
 - **Multi-tenant control plane** — organizations, per-org membership roles (`OWNER > ADMIN > MEMBER > VIEWER`), users, plans, and subscriptions, all managed through a stateless REST API and a React admin console.
+- **Self-service onboarding** — a public signup flow creates a brand-new organization with the signer as its OWNER and logs them straight in; new accounts receive a non-blocking, hashed single-use **email-verification** token (resendable), so verification never gates login. Emails ride the transactional outbox (the raw token is surfaced in-response only under the dev profile).
 - **Offline Ed25519 JWT licensing** — mint, persist, distribute, seat-track, and revoke `.lic` licenses signed with rotatable Ed25519 keys. Customers verify them entirely offline against a public JWKS.
 - **Revocable offline licenses** — revocation propagates through a **signed, cacheable CRL** (`typ=crl+jwt`) that the verifier fetches on a schedule and treats **fail-closed** (a stale/missing revocation view denies access rather than trusting silently). Suspending or cancelling a subscription cascades its live licenses onto the CRL.
 - **RBAC + multi-tenant isolation** — a persistent roles/permissions catalog plus a single composition point (`TenantAccessChecker`, the `@tenantAccess` SpEL bean) that resolves every resource's owning org and makes cross-tenant IDOR structurally impossible. The only global bypass is `super_admin`.
 - **MFA (TOTP)** — RFC-6238 two-step login (password + 6-digit code), AES-GCM-encrypted secret storage, and monotonic last-step replay protection.
-- **Enterprise SSO (OIDC + SAML)** — tenant-scoped IdP config with SSRF-guarded URLs and post-login JIT provisioning that binds `(provider, subject)` to a local user.
+- **Enterprise SSO (OIDC + SAML) + Google sign-in** — tenant-scoped IdP config with SSRF-guarded URLs and post-login JIT provisioning that binds `(provider, subject)` to a local user, now surfaced directly on the login/signup screens through a public org-aware **discovery** endpoint. An optional global **"Continue with Google"** OIDC flow (enabled when Google client credentials are configured) JIT-provisions a fresh personal org for new users and, by design, **refuses to link to a pre-existing password / super-admin / MFA-protected account** — closing the email-collision account-takeover vector.
 - **SCIM 2.0 provisioning** — IdPs can auto-provision/deprovision users via an org-bound API key.
 - **Programmatic API keys** — machine-to-machine auth (`Authorization: ApiKey ...`) with a scope allow-list, tenant binding, and offline-hashed verification.
 - **Provider-neutral billing** — rates a subscription period's metered usage against a plan price book into dedup-guarded, optimistically-locked invoices (a `ManualBillingProvider` seam stands in for a real payment processor).
@@ -78,7 +79,7 @@ The panel holds the **private** Ed25519 signing keys (AES-GCM-encrypted at rest 
 | Persistence | PostgreSQL 16 + **Liquibase** (formatted-SQL changelogs; Hibernate `ddl-auto=validate`) |
 | Cache / coordination | **Redis 7** (session jti denylist, token-version cache, brute-force lockout counters) |
 | Crypto / JWT | Nimbus JOSE+JWT + Google Tink (**Ed25519** licenses/CRL; **HS256** session/MFA tokens; **AES-GCM** KEK envelope for secrets at rest) |
-| Auth | bcrypt(12) passwords, TOTP MFA (`dev.samstevens.totp`), OIDC + SAML SSO (OpenSAML via spring-security-saml2) |
+| Auth | bcrypt(12) passwords, self-service signup + email verification, TOTP MFA (`dev.samstevens.totp`), OIDC + SAML + global Google SSO (OpenSAML via spring-security-saml2) |
 | Reliability | Transactional outbox + `FOR UPDATE SKIP LOCKED` schedulers, `pg_notify`/`LISTEN`, signed webhooks |
 | Observability | Micrometer + Prometheus, structured JSON logging (Logback + logstash-encoder), correlation IDs |
 | Frontend | React + TypeScript + Vite + Tailwind; served by nginx in production |
@@ -91,8 +92,8 @@ The panel holds the **private** Ed25519 signing keys (AES-GCM-encrypted at rest 
 1) Start Postgres + Redis:
 
 ```bash
-docker run -d --name cp-pg -e POSTGRES_DB=cp -e POSTGRES_USER=cp -e POSTGRES_PASSWORD=cp -p 5432:5432 postgres:16.4
-docker run -d --name cp-redis -p 6379:6379 redis:7.4
+docker run -d --name keyforge-postgres -e POSTGRES_DB=cp -e POSTGRES_USER=cp -e POSTGRES_PASSWORD=cp -p 5432:5432 postgres:16.4
+docker run -d --name keyforge-redis -p 6379:6379 redis:7.4
 ```
 
 2) Backend (dev profile; JDK 21+ required — repo built/verified on JDK 24):
@@ -111,7 +112,7 @@ mvn -pl control-panel-api spring-boot:run            # API on :8080, Swagger at 
 cd admin-ui && npm install && npm run dev            # http://localhost:5173
 ```
 
-**First login:** a dev-only bootstrap super-admin is seeded automatically under the dev profile (env: `APP_BOOTSTRAP_ADMIN_EMAIL` / `APP_BOOTSTRAP_ADMIN_PASSWORD`).
+**First login:** a dev-only bootstrap super-admin is seeded automatically under the dev profile (env: `APP_BOOTSTRAP_ADMIN_EMAIL` / `APP_BOOTSTRAP_ADMIN_PASSWORD`) — or just **Create an account** from the login screen to spin up your own organization (the dev profile returns the email-verification token in the response so you can confirm without a mail server). To light up the global **"Continue with Google"** button, also set `APP_SSO_GOOGLE_CLIENT_ID` / `APP_SSO_GOOGLE_CLIENT_SECRET`; otherwise it stays hidden.
 
 **Full docker path:** `docker compose up --build` (set `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `APP_KEY_ENC_MASTER`, `APP_AUTH_SESSION_SECRET`; add `SPRING_PROFILES_ACTIVE=dev` + `APP_AUTH_COOKIE_SECURE=false` to the api service for browser login).
 
@@ -127,7 +128,7 @@ cd admin-ui && npm install && npm run dev            # http://localhost:5173
 .
 ├── control-panel-api/        # The REST API server (Spring Boot 3.3 / Java 21) — issues licenses
 │   └── src/main/java/com/example/cp/   # 20 feature packages (see Backend index below) + ControlPanelApplication
-│   └── src/main/resources/db/changelog # Liquibase formatted-SQL migrations (00–18 + 99)
+│   └── src/main/resources/db/changelog # Liquibase formatted-SQL migrations (00–19 + 99)
 ├── license-verifier/         # Framework-free offline verification SDK (plain Java JAR)
 ├── license-verifier-spring-boot-starter/  # Auto-config + @RequiresPermission AOP wrapping the SDK
 ├── sample-docker-app/        # Reference consumer app + production Dockerfile
@@ -153,11 +154,11 @@ The deep-dive docs under [`docs/`](docs/) are the authoritative reference. Start
 - [`docs/architecture.md`](docs/architecture.md) — the conceptual heart: the HTTP request lifecycle, the auth/session/MFA/SSO model, RBAC + multi-tenant isolation, end-to-end offline license issuance/verification/revocation, the transactional-outbox webhook fan-out, Ed25519 + AES-GCM KEK crypto with rotation, and idempotency/observability/graceful-shutdown.
 
 ### Backend packages (`control-panel-api`)
-- [`docs/backend/auth.md`](docs/backend/auth.md) — the authentication front door: two-step (password + TOTP) login, logout, the stateless HS256 session JWT / `cp_session` cookie, Spring Security filter chains, `JwtAuthFilter`, session-revocation stores, and the brute-force lockout.
+- [`docs/backend/auth.md`](docs/backend/auth.md) — the authentication front door: self-service registration + non-blocking email verification, two-step (password + TOTP) login, logout, the stateless HS256 session JWT / `cp_session` cookie, Spring Security filter chains, `JwtAuthFilter`, session-revocation stores, and the brute-force lockout.
 - [`docs/backend/rbac.md`](docs/backend/rbac.md) — the authorization core: persistent roles/permissions catalog, org-scoped role assignment, and the privilege-amplification / system-role guards.
 - [`docs/backend/security.md`](docs/backend/security.md) — the centralized `TenantAccessChecker` (`@tenantAccess`) bean that enforces multi-tenant isolation for every resource-scoped `@PreAuthorize`.
 - [`docs/backend/mfa.md`](docs/backend/mfa.md) — TOTP (RFC 6238) MFA: enrollment/confirm/verify/disable, AES-GCM-encrypted secrets, replay protection, and the short-lived MFA challenge token.
-- [`docs/backend/sso.md`](docs/backend/sso.md) — enterprise SSO (OIDC + SAML): tenant-scoped provider admin, SSRF-guarded IdP URLs, and post-login JIT provisioning.
+- [`docs/backend/sso.md`](docs/backend/sso.md) — enterprise SSO (OIDC + SAML) + global Google sign-in: tenant-scoped provider admin, SSRF-guarded IdP URLs, public login-screen discovery, and post-login JIT provisioning (with the takeover-safe global-Google linking rules).
 - [`docs/backend/apikeys.md`](docs/backend/apikeys.md) — programmatic API-key issuance, offline-hashed verification, and org-scoped revocation (the machine-to-machine auth path).
 - [`docs/backend/orgs.md`](docs/backend/orgs.md) — the multi-tenancy backbone: organizations, membership roles, the `@orgAccess` bean, and the rank-guard + last-OWNER-protection rules.
 - [`docs/backend/users.md`](docs/backend/users.md) — the system-of-record for human accounts: the `User` entity/repository and the one transactional service that enforces password policy, session revocation, auditing, and optimistic locking.
@@ -198,7 +199,7 @@ The deep-dive docs under [`docs/`](docs/) are the authoritative reference. Start
 
 ## Testing & quality
 
-- **430 tests pass** via `mvn clean verify` (0 failures / errors / skipped), split across all four modules: License Verifier SDK (45), Control Panel API (350), Spring Boot starter (30), sample-docker-app (5).
+- **444 tests pass** via `mvn clean verify` (0 failures / errors / skipped), split across all four modules: License Verifier SDK (45), Control Panel API (364), Spring Boot starter (30), sample-docker-app (5).
 - **Real integration tests** use **Testcontainers** (an ephemeral Postgres 16 per run via the `jdbc:tc:` URL), so `mvn clean verify` needs **JDK 21+ and a running Docker daemon**. Surefire runs unit tests; Failsafe runs `*IT` integration tests on `verify`.
 - A **cross-module contract test** pulls the real `license-verifier` SDK into the API's test scope to verify the panel's live JWKS + signed CRL — proving *what we sign, the SDK can verify*.
 - **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `mvn verify`, an informational dependency-update report, the admin-ui typecheck/build, and a real **OWASP CVE gate** (`-DfailBuildOnCVSS=7`) that can block a merge on any High/Critical transitive CVE. **Dependabot** keeps Maven, npm, and Actions patched weekly.
