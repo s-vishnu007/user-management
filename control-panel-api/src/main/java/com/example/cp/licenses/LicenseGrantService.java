@@ -126,6 +126,11 @@ public class LicenseGrantService {
                 .role(OrgMember.Role.MEMBER)
                 .addedAt(OffsetDateTime.now())
                 .build());
+        // The project records one audit row per request via AuditContext (the issuer sets the
+        // license.issued action), so capture the auto-membership as payload on that row rather than a
+        // separate org.member.added row — the membership is a side-effect of this single operation.
+        AuditContext.putPayload("org_member_added", orgId + ":" + userId);
+        AuditContext.putPayload("org_member_role", OrgMember.Role.MEMBER.name());
     }
 
     private List<String> normalizeRoleCodes(List<String> roleCodes) {

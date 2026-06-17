@@ -18,6 +18,7 @@ import {
 } from '@/components/ui';
 import { DataTable, type Column } from '@/components/DataTable';
 import { PermissionGate } from '@/components/PermissionGate';
+import { useAuth } from '@/lib/auth';
 import { useToast } from '@/lib/toast';
 import { triggerDownload } from '@/lib/download';
 import { fadeRise, staggerContainer } from '@/lib/motion';
@@ -28,6 +29,11 @@ type StatusFilter = 'all' | 'active' | 'expired' | 'revoked';
 export function LicensesPage() {
   const toast = useToast();
   const qc = useQueryClient();
+  const { hasPermission } = useAuth();
+  // Only users who can actually issue see the issue workspace + load the grant catalog (the
+  // /assignable-grants endpoint is gated on license.issue, so fetching it without the permission
+  // would 403). View-only users (license.read) still see the org-scoped license list below.
+  const canIssueLicenses = hasPermission('license.issue');
 
   // Issue-form state — the workspace issues a JWT to a USER inside an ORG with a hand-picked RBAC
   // grant set (roles as presets, individual permissions on top). No plan / subscription involved.
@@ -35,6 +41,9 @@ export function LicensesPage() {
   const [email, setEmail] = useState('');
   const [selectedRoles, setSelectedRoles] = useState<Set<string>>(new Set());
   const [selectedPerms, setSelectedPerms] = useState<Set<string>>(new Set());
+  // Permissions the user toggled ON individually (not via a role). Tracked so that DESELECTING a role
+  // never strips a permission the user explicitly added — see toggleRole's `keep` set.
+  const [manualPerms, setManualPerms] = useState<Set<string>>(new Set());
   const [ttlDays, setTtlDays] = useState('');
   const [trial, setTrial] = useState(false);
   const [audience, setAudience] = useState('');
@@ -45,7 +54,11 @@ export function LicensesPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
 
   const orgsQ = useQuery({ queryKey: ['orgs'], queryFn: orgs.list });
-  const grantsQ = useQuery({ queryKey: ['license-grants'], queryFn: licenses.assignableGrants });
+  const grantsQ = useQuery({
+    queryKey: ['license-grants'],
+    queryFn: licenses.assignableGrants,
+    enabled: canIssueLicenses,
+  });
   const membersQ = useQuery({
     queryKey: ['org', orgId, 'members'],
     queryFn: () => orgs.members(orgId),
@@ -66,7 +79,8 @@ export function LicensesPage() {
     grantsQ.data?.roles.find((r) => r.code === code)?.permissions ?? [];
 
   // Toggling a role preset adds (or removes) exactly its permissions. On removal, a permission is
-  // kept if another still-selected role also grants it. Individual checkboxes then fine-tune freely.
+  // kept if another still-selected role grants it OR the user added it individually (manualPerms) —
+  // so deselecting a role never strips a permission the admin explicitly chose.
   const toggleRole = (code: string) => {
     const turningOn = !selectedRoles.has(code);
     const nextRoles = new Set(selectedRoles);
@@ -78,7 +92,7 @@ export function LicensesPage() {
     if (turningOn) {
       thisPerms.forEach((p) => nextPerms.add(p));
     } else {
-      const keep = new Set<string>();
+      const keep = new Set<string>(manualPerms);
       nextRoles.forEach((rc) => rolePerms(rc).forEach((p) => keep.add(p)));
       thisPerms.forEach((p) => {
         if (!keep.has(p)) nextPerms.delete(p);
@@ -89,10 +103,18 @@ export function LicensesPage() {
   };
 
   const togglePerm = (code: string) => {
+    const turningOn = !selectedPerms.has(code);
     setSelectedPerms((prev) => {
       const next = new Set(prev);
-      if (next.has(code)) next.delete(code);
-      else next.add(code);
+      if (turningOn) next.add(code);
+      else next.delete(code);
+      return next;
+    });
+    // Track individual intent so a later role-deselect doesn't remove a hand-picked permission.
+    setManualPerms((prev) => {
+      const next = new Set(prev);
+      if (turningOn) next.add(code);
+      else next.delete(code);
       return next;
     });
   };
@@ -100,6 +122,7 @@ export function LicensesPage() {
   const clearGrants = () => {
     setSelectedRoles(new Set());
     setSelectedPerms(new Set());
+    setManualPerms(new Set());
   };
 
   // Permissions grouped by category for a scannable picker.
@@ -184,12 +207,20 @@ export function LicensesPage() {
     {
       key: 'subject',
       header: 'Issued to',
-      render: (l) => (
-        <div className="min-w-0">
-          <div className="truncate font-medium text-ink">{l.subjectEmail ?? '—'}</div>
-          <code className="font-mono text-[11px] text-ink-faint">{l.jti.slice(0, 16)}…</code>
-        </div>
-      ),
+      render: (l) => {
+        const isSubscriptionLicense = !l.userId && !!l.subscriptionId;
+        return (
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span className="truncate font-medium text-ink">
+                {l.subjectEmail ?? (isSubscriptionLicense ? 'Subscription license' : '—')}
+              </span>
+              {isSubscriptionLicense && <Badge tone="neutral">subscription</Badge>}
+            </div>
+            <code className="font-mono text-[11px] text-ink-faint">{l.jti.slice(0, 16)}…</code>
+          </div>
+        );
+      },
     },
     {
       key: 'status',
@@ -207,6 +238,10 @@ export function LicensesPage() {
       key: 'grants',
       header: 'Grants',
       render: (l) => {
+        // Subscription/legacy licenses carry no RBAC snapshot — their entitlements live in the plan.
+        if (!l.userId && !!l.subscriptionId) {
+          return <span className="text-xs text-ink-faint">plan-based</span>;
+        }
         const perms = l.permissions ?? [];
         const roles = l.roles ?? [];
         return (
@@ -285,7 +320,8 @@ export function LicensesPage() {
       />
 
       <motion.div variants={staggerContainer} initial="hidden" animate="show">
-        {/* ---- Issue workspace ---- */}
+        {/* ---- Issue workspace (only for users who can issue) ---- */}
+        <PermissionGate permission="license.issue">
         <motion.div variants={fadeRise}>
           <Card className="mb-6">
             <CardHeader
@@ -460,7 +496,7 @@ export function LicensesPage() {
                   <Button
                     onClick={() => issueMut.mutate()}
                     loading={issueMut.isPending}
-                    disabled={!canIssue}
+                    disabled={!canIssue || issueMut.isPending}
                   >
                     Issue JWT license
                   </Button>
@@ -508,6 +544,7 @@ export function LicensesPage() {
             </CardBody>
           </Card>
         </motion.div>
+        </PermissionGate>
 
         {/* ---- Issued licenses for the selected org ---- */}
         <motion.div variants={fadeRise}>

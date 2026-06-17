@@ -4,6 +4,8 @@ import com.example.cp.common.ApiException;
 import com.example.cp.common.PageRequestParams;
 import com.example.cp.common.SecurityUtils;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.Size;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -75,7 +77,7 @@ public class LicenseController {
     @PostMapping("/orgs/{orgId}/licenses")
     @PreAuthorize("@tenantAccess.canIssueLicenseForOrg(#orgId)")
     public ResponseEntity<Map<String, Object>> issueForOrg(@PathVariable("orgId") UUID orgId,
-                                                           @RequestBody IssueForUserRequest body) {
+                                                           @Valid @RequestBody(required = false) IssueForUserRequest body) {
         IssueForUserRequest req = body == null ? new IssueForUserRequest(null, null, null, null, null, null, null, null) : body;
         boolean trial = Boolean.TRUE.equals(req.trial());
         LicenseIssuer.IssuedLicense issued = grantService.issue(
@@ -115,7 +117,7 @@ public class LicenseController {
      * Authenticated-only — it exposes the static RBAC vocabulary, not any assignment.
      */
     @GetMapping("/licenses/assignable-grants")
-    @PreAuthorize("isAuthenticated()")
+    @PreAuthorize("hasAuthority('license.issue') or hasAuthority('SUPER_ADMIN')")
     public LicenseGrantService.AssignableGrants assignableGrants() {
         return grantService.assignableGrants();
     }
@@ -218,13 +220,18 @@ public class LicenseController {
      */
     public record IssueForUserRequest(
             UUID userId,
+            @Email(message = "email must be a valid address")
+            @Size(max = 320, message = "email too long")
             String email,
-            List<String> roleCodes,
-            List<String> permissions,
+            @Size(max = 50, message = "at most 50 roleCodes")
+            List<@Size(max = 64) String> roleCodes,
+            @Size(max = 500, message = "at most 500 permissions")
+            List<@Size(max = 128) String> permissions,
             Integer ttlDays,
-            List<String> audience,
+            @Size(max = 50, message = "at most 50 audiences")
+            List<@Size(max = 256) String> audience,
             Boolean trial,
-            String notes) {}
+            @Size(max = 1000) String notes) {}
 
     public record RevokeRequest(String reason) {}
 }

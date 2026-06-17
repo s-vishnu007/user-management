@@ -124,14 +124,33 @@ class PerUserLicenseIssuanceIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void assignableGrants_exposesRolesAndPermissions() throws Exception {
-        User any = seedUser("pu-grants-" + rnd() + "@example.com", "Grant Reader", false);
+    void assignableGrants_exposesRolesAndPermissions_toIssuers() throws Exception {
+        User issuer = seedUser("pu-grants-" + rnd() + "@example.com", "Grant Reader", false);
         mockMvc.perform(get("/api/v1/licenses/assignable-grants")
-                        .with(asUser(any)))
+                        .with(asUser(issuer, "license.issue")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.permissions").isArray())
                 .andExpect(jsonPath("$.roles").isArray())
                 .andExpect(jsonPath("$.permissions[0].code").exists());
+    }
+
+    @Test
+    void assignableGrants_forbiddenWithoutIssueAuthority() throws Exception {
+        User viewer = seedUser("pu-grants-deny-" + rnd() + "@example.com", "No Issue", false);
+        mockMvc.perform(get("/api/v1/licenses/assignable-grants")
+                        .with(asUser(viewer, "license.read")))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void issue_withMalformedEmail_isBadRequest() throws Exception {
+        Organization org = seedOrg("PU Email Org " + rnd());
+        User superAdmin = seedUser("pu-email-super-" + rnd() + "@example.com", "PU Email Super", true);
+        mockMvc.perform(post("/api/v1/orgs/{orgId}/licenses", org.getId())
+                        .with(asSuperAdmin(superAdmin))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"email\":\"not-an-email\",\"permissions\":[\"license.read\"]}"))
+                .andExpect(status().isBadRequest());
     }
 
     @Test

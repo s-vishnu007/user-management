@@ -6,7 +6,7 @@
 
 It is built for software vendors who ship on-prem / in-customer-cloud and need the licensing guarantees of a phone-home SaaS (entitlements, seat counts, expiry, revocation) **without** requiring the customer's deployment to call home at request time.
 
-> **Status: BETA.** The system went through a full security audit (2026-06-01, verdict *ALPHA*) and a complete remediation + re-audit (2026-06-13, verdict *BETA*). Self-service signup, email verification, and Google sign-in were since added and hardened against a follow-up adversarial re-audit. **444 tests pass** (`mvn clean verify`). See [Testing & quality](#testing--quality) and [`AUDIT.md`](AUDIT.md) / [`AUDIT-undated.md`](AUDIT-undated.md) for the full history. *Not yet hardened for fully untrusted-tenant production; intended for controlled / closed-beta multi-tenant use.*
+> **Status: BETA.** The system went through a full security audit (2026-06-01, verdict *ALPHA*) and a complete remediation + re-audit (2026-06-13, verdict *BETA*). Self-service signup, email verification, and Google sign-in were since added and hardened against a follow-up adversarial re-audit; license issuance was then extended with a **per-user, org-anchored** flow carrying hand-picked RBAC grants (audited and remediated 2026-06-17). **453 tests pass** (`mvn clean verify`). See [Testing & quality](#testing--quality) and [`AUDIT.md`](AUDIT.md) / [`AUDIT-undated.md`](AUDIT-undated.md) for the full history. *Not yet hardened for fully untrusted-tenant production; intended for controlled / closed-beta multi-tenant use.*
 
 ---
 
@@ -18,6 +18,7 @@ The two halves of the system **never share a database**. The only contract betwe
 - **Multi-tenant control plane** — organizations, per-org membership roles (`OWNER > ADMIN > MEMBER > VIEWER`), users, plans, and subscriptions, all managed through a stateless REST API and a React admin console.
 - **Self-service onboarding** — a public signup flow creates a brand-new organization with the signer as its OWNER and logs them straight in; new accounts receive a non-blocking, hashed single-use **email-verification** token (resendable), so verification never gates login. Emails ride the transactional outbox (the raw token is surfaced in-response only under the dev profile).
 - **Offline Ed25519 JWT licensing** — mint, persist, distribute, seat-track, and revoke `.lic` licenses signed with rotatable Ed25519 keys. Customers verify them entirely offline against a public JWKS.
+- **Per-user license issuance with hand-picked RBAC grants** — issue a license directly to a *user* inside an organization (an existing member, or invite-by-email which provisions the user and adds them to the org), choosing the exact **role presets + individual permissions** baked into the JWT, independent of any plan or subscription. The signed token's subject is the user, and its claims carry the chosen org/user/permissions/roles; the token anchors on `org_id`/`user_id` so tenant isolation, listing, download, and revocation resolve without a subscription. Issuance is restricted to org `ADMIN`/`OWNER` (or `super_admin`).
 - **Revocable offline licenses** — revocation propagates through a **signed, cacheable CRL** (`typ=crl+jwt`) that the verifier fetches on a schedule and treats **fail-closed** (a stale/missing revocation view denies access rather than trusting silently). Suspending or cancelling a subscription cascades its live licenses onto the CRL.
 - **RBAC + multi-tenant isolation** — a persistent roles/permissions catalog plus a single composition point (`TenantAccessChecker`, the `@tenantAccess` SpEL bean) that resolves every resource's owning org and makes cross-tenant IDOR structurally impossible. The only global bypass is `super_admin`.
 - **MFA (TOTP)** — RFC-6238 two-step login (password + 6-digit code), AES-GCM-encrypted secret storage, and monotonic last-step replay protection.
@@ -128,7 +129,7 @@ cd admin-ui && npm install && npm run dev            # http://localhost:5173
 .
 ├── control-panel-api/        # The REST API server (Spring Boot 3.3 / Java 21) — issues licenses
 │   └── src/main/java/com/example/cp/   # 20 feature packages (see Backend index below) + ControlPanelApplication
-│   └── src/main/resources/db/changelog # Liquibase formatted-SQL migrations (00–19 + 99)
+│   └── src/main/resources/db/changelog # Liquibase formatted-SQL migrations (00–20 + 99)
 ├── license-verifier/         # Framework-free offline verification SDK (plain Java JAR)
 ├── license-verifier-spring-boot-starter/  # Auto-config + @RequiresPermission AOP wrapping the SDK
 ├── sample-docker-app/        # Reference consumer app + production Dockerfile
@@ -199,7 +200,7 @@ The deep-dive docs under [`docs/`](docs/) are the authoritative reference. Start
 
 ## Testing & quality
 
-- **444 tests pass** via `mvn clean verify` (0 failures / errors / skipped), split across all four modules: License Verifier SDK (45), Control Panel API (364), Spring Boot starter (30), sample-docker-app (5).
+- **453 tests pass** via `mvn clean verify` (0 failures / errors / skipped), split across all four modules: License Verifier SDK (45), Control Panel API (373), Spring Boot starter (30), sample-docker-app (5).
 - **Real integration tests** use **Testcontainers** (an ephemeral Postgres 16 per run via the `jdbc:tc:` URL), so `mvn clean verify` needs **JDK 21+ and a running Docker daemon**. Surefire runs unit tests; Failsafe runs `*IT` integration tests on `verify`.
 - A **cross-module contract test** pulls the real `license-verifier` SDK into the API's test scope to verify the panel's live JWKS + signed CRL — proving *what we sign, the SDK can verify*.
 - **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `mvn verify`, an informational dependency-update report, the admin-ui typecheck/build, and a real **OWASP CVE gate** (`-DfailBuildOnCVSS=7`) that can block a merge on any High/Critical transitive CVE. **Dependabot** keeps Maven, npm, and Actions patched weekly.
