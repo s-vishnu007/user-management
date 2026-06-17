@@ -64,7 +64,7 @@ public class OrgController {
     public PagedResponse<OrgMemberDto> listMembers(@PathVariable UUID orgId,
                                                    @RequestParam(value = "page", required = false) Integer page,
                                                    @RequestParam(value = "size", required = false) Integer size) {
-        List<OrgMemberDto> all = orgService.listMembers(orgId).stream()
+        List<OrgMemberDto> all = orgService.listMembersDetailed(orgId).stream()
                 .map(OrgMemberDto::from).toList();
         return paginate(all, PageRequestParams.of(page, size, null));
     }
@@ -99,7 +99,7 @@ public class OrgController {
                 : orgService.roleOf(orgId, actor.userId())
                         .orElseThrow(() -> com.example.cp.common.ApiException.forbidden("Not a member of this organization"));
         OrgMember saved = orgService.addMember(orgId, body.email(), role, actorRole);
-        return ResponseEntity.status(201).body(OrgMemberDto.from(saved));
+        return ResponseEntity.status(201).body(OrgMemberDto.from(saved, body.email(), null));
     }
 
     @DeleteMapping("/{orgId}/members/{userId}")
@@ -143,9 +143,17 @@ public class OrgController {
         }
     }
 
-    public record OrgMemberDto(UUID orgId, UUID userId, String role, OffsetDateTime addedAt) {
-        public static OrgMemberDto from(OrgMember m) {
-            return new OrgMemberDto(m.getOrgId(), m.getUserId(),
+    public record OrgMemberDto(UUID orgId, UUID userId, String email, String fullName,
+                               String role, OffsetDateTime addedAt) {
+        public static OrgMemberDto from(OrgService.MemberView v) {
+            OrgMember m = v.member();
+            return new OrgMemberDto(m.getOrgId(), m.getUserId(), v.email(), v.fullName(),
+                    m.getRole() == null ? null : m.getRole().name(),
+                    m.getAddedAt());
+        }
+
+        public static OrgMemberDto from(OrgMember m, String email, String fullName) {
+            return new OrgMemberDto(m.getOrgId(), m.getUserId(), email, fullName,
                     m.getRole() == null ? null : m.getRole().name(),
                     m.getAddedAt());
         }

@@ -74,4 +74,6 @@ databaseChangeLog:
   - include:
       file: db/changelog/changes/19-signup-email-verification.sql
   - include:
+      file: db/changelog/changes/20-license-user-grants.sql
+  - include:
       file: db/changelog/changes/99-auth-password-reset.sql

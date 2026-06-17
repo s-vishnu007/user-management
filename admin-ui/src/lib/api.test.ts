@@ -158,6 +158,43 @@ describe('licenses client — subscription-scoped contract', () => {
   });
 });
 
+describe('licenses client — per-user org flow', () => {
+  it('issueForOrg posts to /orgs/{orgId}/licenses with the grant payload + Idempotency-Key', async () => {
+    const post = vi.spyOn(http, 'post').mockResolvedValue(mockResponse({ jti: 'lic_1' }));
+    await licenses.issueForOrg('org-1', {
+      email: 'jane@acme.com',
+      roleCodes: ['ORG_ADMIN'],
+      permissions: ['license.read', 'usage.read'],
+      ttlDays: 365,
+      trial: false,
+    });
+    const [url, body, config] = post.mock.calls[0];
+    expect(url).toBe('/api/v1/orgs/org-1/licenses');
+    expect(body).toMatchObject({
+      email: 'jane@acme.com',
+      roleCodes: ['ORG_ADMIN'],
+      permissions: ['license.read', 'usage.read'],
+      ttlDays: 365,
+    });
+    expect((config as { headers: Record<string, string> }).headers['Idempotency-Key']).toBeTruthy();
+  });
+
+  it('listForOrg targets the org-scoped endpoint and forwards status', async () => {
+    const get = vi.spyOn(http, 'get').mockResolvedValue(mockResponse([]));
+    await licenses.listForOrg('org-9', 'ACTIVE');
+    expect(get.mock.calls[0][0]).toBe('/api/v1/orgs/org-9/licenses?status=ACTIVE');
+  });
+
+  it('assignableGrants reads the grant catalog endpoint', async () => {
+    const get = vi
+      .spyOn(http, 'get')
+      .mockResolvedValue(mockResponse({ permissions: [], roles: [] }));
+    const grants = await licenses.assignableGrants();
+    expect(get.mock.calls[0][0]).toBe('/api/v1/licenses/assignable-grants');
+    expect(grants).toEqual({ permissions: [], roles: [] });
+  });
+});
+
 describe('subscriptions client — idempotent create', () => {
   it('create sends an Idempotency-Key header and honors an explicit key', async () => {
     const post = vi.spyOn(http, 'post').mockResolvedValue(mockResponse({}));

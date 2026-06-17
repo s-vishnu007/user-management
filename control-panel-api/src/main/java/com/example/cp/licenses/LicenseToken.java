@@ -45,8 +45,39 @@ public class LicenseToken {
     @Column(name = "jti", nullable = false, unique = true, length = 64)
     private String jti;
 
-    @Column(name = "subscription_id", nullable = false)
+    /**
+     * Legacy/back-compat anchor: set only for licenses minted from a subscription
+     * ({@code POST /subscriptions/{id}/licenses}). Per-user licenses ({@code POST /orgs/{id}/licenses})
+     * leave this NULL and anchor on {@link #orgId} instead (migration 20 dropped the NOT NULL).
+     */
+    @Column(name = "subscription_id")
     private UUID subscriptionId;
+
+    /**
+     * Owning organization. The direct tenant anchor for per-user licenses (no subscription hop);
+     * backfilled from the subscription for legacy rows so {@code TenantAccessChecker.resolveOrgForJti}
+     * can resolve any token's org uniformly.
+     */
+    @Column(name = "org_id")
+    private UUID orgId;
+
+    /** The user this license was issued to (the JWT subject). NULL for legacy subscription licenses. */
+    @Column(name = "user_id")
+    private UUID userId;
+
+    /** Durable display snapshot of the subject's email (survives a later user delete). */
+    @Column(name = "subject_email", length = 320)
+    private String subjectEmail;
+
+    /** JSON-array snapshot of the permission codes baked into the JWT (for the Licenses list / audit). */
+    @Builder.Default
+    @Column(name = "permissions", nullable = false, columnDefinition = "text")
+    private String permissions = "[]";
+
+    /** JSON-array snapshot of the role codes chosen as presets when issuing. */
+    @Builder.Default
+    @Column(name = "roles", nullable = false, columnDefinition = "text")
+    private String roles = "[]";
 
     @Column(name = "kid", nullable = false, length = 64)
     private String kid;

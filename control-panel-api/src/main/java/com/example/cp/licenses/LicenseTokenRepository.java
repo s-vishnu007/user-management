@@ -62,6 +62,12 @@ public interface LicenseTokenRepository extends JpaRepository<LicenseToken, UUID
 
     List<LicenseToken> findBySubscriptionIdOrderByIssuedAtDesc(UUID subscriptionId, Pageable pageable);
 
+    // Org-anchored listing for the per-user Licenses workspace (org_id is the direct tenant anchor;
+    // covers both new per-user tokens and backfilled legacy subscription tokens).
+    List<LicenseToken> findByOrgIdOrderByIssuedAtDesc(UUID orgId, Pageable pageable);
+
+    List<LicenseToken> findByOrgIdAndStatusOrderByIssuedAtDesc(UUID orgId, LicenseToken.Status status, Pageable pageable);
+
     List<LicenseToken> findBySubscriptionIdAndStatusOrderByIssuedAtDesc(UUID subscriptionId, LicenseToken.Status status);
 
     List<LicenseToken> findBySubscriptionIdAndStatusOrderByIssuedAtDesc(UUID subscriptionId, LicenseToken.Status status, Pageable pageable);

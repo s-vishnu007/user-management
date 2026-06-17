@@ -27,6 +27,7 @@ import java.util.UUID;
 public class LicenseController {
 
     private final LicenseIssuer issuer;
+    private final LicenseGrantService grantService;
     private final LicenseFileBuilder fileBuilder;
     private final LicenseRevocationService revocationService;
     private final LicenseTokenRepository tokenRepo;
@@ -34,12 +35,14 @@ public class LicenseController {
     private final ActivationService activationService;
 
     public LicenseController(LicenseIssuer issuer,
+                             LicenseGrantService grantService,
                              LicenseFileBuilder fileBuilder,
                              LicenseRevocationService revocationService,
                              LicenseTokenRepository tokenRepo,
                              LicenseArtifactRepository artifactRepo,
                              ActivationService activationService) {
         this.issuer = issuer;
+        this.grantService = grantService;
         this.fileBuilder = fileBuilder;
         this.revocationService = revocationService;
         this.tokenRepo = tokenRepo;
@@ -60,6 +63,64 @@ public class LicenseController {
         // The exact signed artifact is persisted by the issuer (license_artifacts) so /download is a
         // pure read of the stored JWT — no in-memory cache and no re-issue on miss.
 
+        return ResponseEntity.status(201).body(issuedBody(issued));
+    }
+
+    /**
+     * Per-user license issuance (the primary Licenses workspace flow): mints a JWT for a specific user
+     * inside {@code orgId} carrying a hand-picked RBAC grant set — no plan, no subscription. The
+     * subject may be identified by {@code userId} or provisioned from {@code email} (invite-by-email);
+     * the grant set is {@code expand(roleCodes) ∪ permissions}, validated against the RBAC catalog.
+     */
+    @PostMapping("/orgs/{orgId}/licenses")
+    @PreAuthorize("@tenantAccess.canIssueLicenseForOrg(#orgId)")
+    public ResponseEntity<Map<String, Object>> issueForOrg(@PathVariable("orgId") UUID orgId,
+                                                           @RequestBody IssueForUserRequest body) {
+        IssueForUserRequest req = body == null ? new IssueForUserRequest(null, null, null, null, null, null, null, null) : body;
+        boolean trial = Boolean.TRUE.equals(req.trial());
+        LicenseIssuer.IssuedLicense issued = grantService.issue(
+                orgId, req.userId(), req.email(),
+                req.roleCodes(), req.permissions(),
+                req.ttlDays(), req.audience(), trial);
+        return ResponseEntity.status(201).body(issuedBody(issued));
+    }
+
+    @GetMapping("/orgs/{orgId}/licenses")
+    @PreAuthorize("@tenantAccess.canAccessOrg(#orgId)")
+    public List<LicenseDto> listByOrg(@PathVariable("orgId") UUID orgId,
+                                      @RequestParam(required = false) String status,
+                                      @RequestParam(required = false) Integer page,
+                                      @RequestParam(required = false) Integer size) {
+        // Org is the direct tenant anchor; the caller is authorized against it by @tenantAccess above.
+        // Server-side page/size caps bound the result set (mirrors the subscription-scoped list).
+        org.springframework.data.domain.Pageable pageable = PageRequestParams.of(page, size, null);
+        List<LicenseToken> rows;
+        if (status != null) {
+            LicenseToken.Status parsed;
+            try {
+                parsed = LicenseToken.Status.valueOf(status.toUpperCase());
+            } catch (IllegalArgumentException e) {
+                throw ApiException.badRequest("Invalid status: " + status);
+            }
+            rows = tokenRepo.findByOrgIdAndStatusOrderByIssuedAtDesc(orgId, parsed, pageable);
+        } else {
+            rows = tokenRepo.findByOrgIdOrderByIssuedAtDesc(orgId, pageable);
+        }
+        return rows.stream().map(LicenseDto::from).toList();
+    }
+
+    /**
+     * The catalog of grants an admin may bake into a per-user license: the permission catalog plus
+     * roles with their expanded permission codes (so the UI can offer "role preset, then fine-tune").
+     * Authenticated-only — it exposes the static RBAC vocabulary, not any assignment.
+     */
+    @GetMapping("/licenses/assignable-grants")
+    @PreAuthorize("isAuthenticated()")
+    public LicenseGrantService.AssignableGrants assignableGrants() {
+        return grantService.assignableGrants();
+    }
+
+    private static Map<String, Object> issuedBody(LicenseIssuer.IssuedLicense issued) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("jti", issued.jti());
         out.put("kid", issued.kid());
@@ -69,7 +130,7 @@ public class LicenseController {
         // depending on the cache. The .lic envelope is also available via downloadUrl.
         out.put("license", issued.jwt());
         out.put("downloadUrl", "/api/v1/licenses/" + issued.jti() + "/download");
-        return ResponseEntity.status(201).body(out);
+        return out;
     }
 
     @GetMapping("/licenses/{jti}/download")
@@ -148,6 +209,22 @@ public class LicenseController {
     }
 
     public record IssueRequest(Integer ttlDays, List<String> audience, String notes, Boolean trial) {}
+
+    /**
+     * Body for per-user issuance ({@code POST /orgs/{orgId}/licenses}). Identify the subject by
+     * {@code userId} OR {@code email} (an unknown email is provisioned + added to the org). The grant
+     * set is {@code roleCodes} (presets, expanded server-side) unioned with individual {@code
+     * permissions}. {@code ttlDays}/{@code audience}/{@code trial} mirror the subscription issue body.
+     */
+    public record IssueForUserRequest(
+            UUID userId,
+            String email,
+            List<String> roleCodes,
+            List<String> permissions,
+            Integer ttlDays,
+            List<String> audience,
+            Boolean trial,
+            String notes) {}
 
     public record RevokeRequest(String reason) {}
 }

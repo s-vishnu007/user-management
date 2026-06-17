@@ -7,6 +7,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -29,7 +30,6 @@ public class LicenseRevocationService {
         if (t.getStatus() == LicenseToken.Status.REVOKED) {
             return t;
         }
-        UUID subscriptionId = t.getSubscriptionId();
         OffsetDateTime revokedAt = OffsetDateTime.now();
 
         // Guarded conditional UPDATE (audit P1-8): only revokes if not already revoked, atomic
@@ -45,14 +45,18 @@ public class LicenseRevocationService {
         if (reason != null) AuditContext.putPayload("reason", reason);
         if (actorUserId != null) AuditContext.putPayload("revoked_by", actorUserId.toString());
 
-        outbox.publish("license_token", jti, "LicenseRevoked",
-                Map.of(
-                        "jti", jti,
-                        "subscription_id", subscriptionId.toString(),
-                        "reason", reason == null ? "" : reason,
-                        "revoked_at", revokedAt.toString()
-                )
-        );
+        // Carry whichever anchor the token has: subscription-anchored (legacy) tokens emit
+        // subscription_id; per-user (org-anchored) tokens emit org_id/user_id. A null subscription
+        // must NOT be .toString()'d (NPE) nor placed in a Map.of (rejects nulls), so build it
+        // conditionally.
+        Map<String, Object> event = new LinkedHashMap<>();
+        event.put("jti", jti);
+        if (t.getSubscriptionId() != null) event.put("subscription_id", t.getSubscriptionId().toString());
+        if (t.getOrgId() != null) event.put("org_id", t.getOrgId().toString());
+        if (t.getUserId() != null) event.put("user_id", t.getUserId().toString());
+        event.put("reason", reason == null ? "" : reason);
+        event.put("revoked_at", revokedAt.toString());
+        outbox.publish("license_token", jti, "LicenseRevoked", event);
 
         return repo.findByJti(jti).orElseThrow(() -> ApiException.notFound("License not found"));
     }

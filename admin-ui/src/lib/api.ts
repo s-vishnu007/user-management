@@ -2,6 +2,7 @@ import axios, { AxiosError, type AxiosInstance } from 'axios';
 import type {
   ApiKey,
   ApiKeyDto,
+  AssignableGrants,
   AuditEntry,
   AuthIdentity,
   IssuedLicense,
@@ -326,6 +327,48 @@ export const licenses = {
       payload ?? {},
       idempotent(idempotencyKey),
     );
+    return data;
+  },
+  /**
+   * Per-user issuance (the primary Licenses workspace flow): mints a JWT for a user inside an org
+   * carrying a hand-picked RBAC grant set — no plan/subscription. Identify the subject by `userId`
+   * or `email` (an unknown email is provisioned + added to the org). `permissions` (when present) is
+   * the authoritative fine-tuned set; `roleCodes` are stored as the preset snapshot.
+   */
+  issueForOrg: async (
+    orgId: string,
+    payload: {
+      userId?: string;
+      email?: string;
+      roleCodes?: string[];
+      permissions?: string[];
+      ttlDays?: number;
+      audience?: string[];
+      trial?: boolean;
+      notes?: string;
+    },
+    idempotencyKey?: string,
+  ): Promise<IssuedLicense> => {
+    const { data } = await http.post<IssuedLicense>(
+      `/api/v1/orgs/${orgId}/licenses`,
+      payload,
+      idempotent(idempotencyKey),
+    );
+    return data;
+  },
+  /** Org-anchored license list backing the Licenses workspace (shows every per-user token in the org). */
+  listForOrg: async (orgId: string, status?: string): Promise<License[]> => {
+    const q = new URLSearchParams();
+    if (status) q.set('status', status);
+    const qs = q.toString();
+    const { data } = await http.get<License[] | Paged<License>>(
+      `/api/v1/orgs/${orgId}/licenses${qs ? `?${qs}` : ''}`,
+    );
+    return Array.isArray(data) ? data : data.items;
+  },
+  /** Catalog of roles (with expanded permissions) + the permission catalog to populate the grant picker. */
+  assignableGrants: async (): Promise<AssignableGrants> => {
+    const { data } = await http.get<AssignableGrants>('/api/v1/licenses/assignable-grants');
     return data;
   },
   // The /licenses endpoint REQUIRES subscriptionId (the tenant-leak fix). There is no unscoped

@@ -11,7 +11,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.security.SecureRandom;
 import java.time.OffsetDateTime;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -128,6 +130,30 @@ public class OrgService {
     public List<OrgMember> listMembers(UUID orgId) {
         return memberRepository.findByOrgId(orgId);
     }
+
+    /**
+     * Members of an org with their user email/full-name joined in, so the UI can render WHO each
+     * member is (the bare {@link OrgMember} carries only ids). Used by the member list and the
+     * per-user license issuer's subject picker.
+     */
+    @Transactional(readOnly = true)
+    public List<MemberView> listMembersDetailed(UUID orgId) {
+        List<OrgMember> members = memberRepository.findByOrgId(orgId);
+        List<UUID> ids = members.stream().map(OrgMember::getUserId).toList();
+        Map<UUID, User> byId = new HashMap<>();
+        for (User u : userRepository.findAllById(ids)) {
+            byId.put(u.getId(), u);
+        }
+        return members.stream()
+                .map(m -> {
+                    User u = byId.get(m.getUserId());
+                    return new MemberView(m, u == null ? null : u.getEmail(), u == null ? null : u.getFullName());
+                })
+                .toList();
+    }
+
+    /** An {@link OrgMember} enriched with the subject user's display fields. */
+    public record MemberView(OrgMember member, String email, String fullName) {}
 
     @Transactional(readOnly = true)
     public boolean isMember(UUID orgId, UUID userId) {

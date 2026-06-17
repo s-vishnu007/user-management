@@ -93,6 +93,11 @@ public class TenantAccessChecker {
         return canWriteSubscription(subscriptionId);
     }
 
+    public boolean canIssueLicenseForOrg(UUID orgId) {
+        // Per-user license issuance is a write operation directly against the target org.
+        return canManageOrg(orgId);
+    }
+
     public boolean canReadUsageForSubscription(UUID subscriptionId) {
         return canReadSubscription(subscriptionId);
     }
@@ -121,9 +126,13 @@ public class TenantAccessChecker {
 
     Optional<UUID> resolveOrgForJti(String jti) {
         if (jti == null || jti.isBlank()) return Optional.empty();
-        return tokenRepo.findByJti(jti)
-                .map(LicenseToken::getSubscriptionId)
-                .flatMap(this::resolveOrgForSubscription);
+        // Prefer the token's direct org anchor (per-user licenses have no subscription); fall back to
+        // the subscription hop for legacy subscription-anchored tokens that predate migration 20's
+        // backfill. Either way the owning org is resolved without trusting the caller.
+        return tokenRepo.findByJti(jti).flatMap(t ->
+                t.getOrgId() != null
+                        ? Optional.of(t.getOrgId())
+                        : resolveOrgForSubscription(t.getSubscriptionId()));
     }
 
     private boolean isMemberOf(AuthenticatedUser u, UUID orgId) {

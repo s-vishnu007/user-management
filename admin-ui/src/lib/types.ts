@@ -102,8 +102,11 @@ export interface OrgMember {
   userId: string;
   email: string;
   displayName?: string;
+  /** Backend now joins the user's full name into the member list (see OrgMemberDto). */
+  fullName?: string;
   role: Role;
   joinedAt?: string;
+  addedAt?: string;
 }
 
 export interface Permission {
@@ -181,11 +184,38 @@ export interface License {
   status?: 'ACTIVE' | 'REVOKED' | 'EXPIRED' | string;
   licenseType?: string | null;
   activeSeats?: number | null;
-  // The list endpoint is subscription-scoped and does not carry org/plan; these are
-  // enriched client-side (see LicensesPage) when iterating an org's subscriptions.
+  // Per-user license fields (the org+user RBAC flow): the org the token is anchored to, the subject
+  // user it was issued to, and the RBAC snapshot baked into the JWT.
   orgId?: string;
+  userId?: string | null;
+  subjectEmail?: string | null;
+  permissions?: string[];
+  roles?: string[];
+  // Legacy/enrichment-only display fields (subscription-scoped tokens).
   orgName?: string;
   planCode?: string;
+}
+
+/** A permission offered in the per-user license grant picker (mirror of LicenseGrantService.GrantPermission). */
+export interface GrantPermission {
+  code: string;
+  name?: string;
+  description?: string;
+  category?: string;
+}
+
+/** A role preset offered in the grant picker, with its expanded permission codes (GrantRole). */
+export interface GrantRole {
+  code: string;
+  name?: string;
+  description?: string;
+  permissions: string[];
+}
+
+/** Catalog returned by GET /licenses/assignable-grants: what an admin may bake into a license. */
+export interface AssignableGrants {
+  permissions: GrantPermission[];
+  roles: GrantRole[];
 }
 
 /** Raw response of the {@code POST /subscriptions/{subId}/licenses} issue endpoint. */

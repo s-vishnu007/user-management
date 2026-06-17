@@ -1,72 +1,142 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
-import { apiErrorMessage, licenses, orgs, subscriptions } from '@/lib/api';
+import { apiErrorMessage, licenses, orgs } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
-import { Button, Card, CardBody, Field, Input, Select, StatusBadge } from '@/components/ui';
+import {
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  Field,
+  Input,
+  PageLoader,
+  Select,
+  StatusBadge,
+  Textarea,
+} from '@/components/ui';
 import { DataTable, type Column } from '@/components/DataTable';
 import { PermissionGate } from '@/components/PermissionGate';
 import { useToast } from '@/lib/toast';
 import { triggerDownload } from '@/lib/download';
 import { fadeRise, staggerContainer } from '@/lib/motion';
-import type { License } from '@/lib/types';
+import type { IssuedLicense, License } from '@/lib/types';
 
 type StatusFilter = 'all' | 'active' | 'expired' | 'revoked';
 
 export function LicensesPage() {
   const toast = useToast();
   const qc = useQueryClient();
-  const [filter, setFilter] = useState('');
+
+  // Issue-form state — the workspace issues a JWT to a USER inside an ORG with a hand-picked RBAC
+  // grant set (roles as presets, individual permissions on top). No plan / subscription involved.
+  const [orgId, setOrgId] = useState('');
+  const [email, setEmail] = useState('');
+  const [selectedRoles, setSelectedRoles] = useState<Set<string>>(new Set());
+  const [selectedPerms, setSelectedPerms] = useState<Set<string>>(new Set());
+  const [ttlDays, setTtlDays] = useState('');
+  const [trial, setTrial] = useState(false);
+  const [audience, setAudience] = useState('');
+  const [issued, setIssued] = useState<IssuedLicense | null>(null);
+
+  // List filters.
+  const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
 
-  // The /licenses endpoint requires a subscriptionId (the tenant-leak fix), so a global
-  // unscoped list is no longer possible. The admin picks an org, then a subscription, and we
-  // list that subscription's licenses. (Flagged: a scoped backend aggregate endpoint would let
-  // us show a true cross-subscription view — see crossCuttingNotes.)
-  const [orgId, setOrgId] = useState('');
-  const [subId, setSubId] = useState('');
-
   const orgsQ = useQuery({ queryKey: ['orgs'], queryFn: orgs.list });
-  const subsQ = useQuery({
-    queryKey: ['org', orgId, 'subscriptions'],
-    queryFn: () => subscriptions.listForOrg(orgId),
+  const grantsQ = useQuery({ queryKey: ['license-grants'], queryFn: licenses.assignableGrants });
+  const membersQ = useQuery({
+    queryKey: ['org', orgId, 'members'],
+    queryFn: () => orgs.members(orgId),
+    enabled: !!orgId,
+  });
+  const licsQ = useQuery({
+    queryKey: ['licenses', 'org', orgId],
+    queryFn: () => licenses.listForOrg(orgId),
     enabled: !!orgId,
   });
 
-  // Reset the selected subscription whenever the org changes.
+  // Switching org clears the just-issued result (it belonged to the previous scope).
   useEffect(() => {
-    setSubId('');
+    setIssued(null);
   }, [orgId]);
 
-  const licsQ = useQuery({
-    queryKey: ['licenses', 'sub', subId],
-    queryFn: () => licenses.listForSubscription(subId),
-    enabled: !!subId,
+  const rolePerms = (code: string): string[] =>
+    grantsQ.data?.roles.find((r) => r.code === code)?.permissions ?? [];
+
+  // Toggling a role preset adds (or removes) exactly its permissions. On removal, a permission is
+  // kept if another still-selected role also grants it. Individual checkboxes then fine-tune freely.
+  const toggleRole = (code: string) => {
+    const turningOn = !selectedRoles.has(code);
+    const nextRoles = new Set(selectedRoles);
+    if (turningOn) nextRoles.add(code);
+    else nextRoles.delete(code);
+
+    const nextPerms = new Set(selectedPerms);
+    const thisPerms = rolePerms(code);
+    if (turningOn) {
+      thisPerms.forEach((p) => nextPerms.add(p));
+    } else {
+      const keep = new Set<string>();
+      nextRoles.forEach((rc) => rolePerms(rc).forEach((p) => keep.add(p)));
+      thisPerms.forEach((p) => {
+        if (!keep.has(p)) nextPerms.delete(p);
+      });
+    }
+    setSelectedRoles(nextRoles);
+    setSelectedPerms(nextPerms);
+  };
+
+  const togglePerm = (code: string) => {
+    setSelectedPerms((prev) => {
+      const next = new Set(prev);
+      if (next.has(code)) next.delete(code);
+      else next.add(code);
+      return next;
+    });
+  };
+
+  const clearGrants = () => {
+    setSelectedRoles(new Set());
+    setSelectedPerms(new Set());
+  };
+
+  // Permissions grouped by category for a scannable picker.
+  const groupedPerms = useMemo(() => {
+    const map = new Map<string, { code: string; name?: string; description?: string }[]>();
+    (grantsQ.data?.permissions ?? []).forEach((p) => {
+      const cat = p.category || 'other';
+      if (!map.has(cat)) map.set(cat, []);
+      map.get(cat)!.push(p);
+    });
+    return [...map.entries()];
+  }, [grantsQ.data]);
+
+  const issueMut = useMutation({
+    mutationFn: () =>
+      licenses.issueForOrg(orgId, {
+        email: email.trim() || undefined,
+        roleCodes: [...selectedRoles],
+        permissions: [...selectedPerms],
+        ttlDays: ttlDays ? Number(ttlDays) : undefined,
+        trial,
+        audience: audience.trim()
+          ? audience.split(',').map((s) => s.trim()).filter(Boolean)
+          : undefined,
+      }),
+    onSuccess: (lic) => {
+      setIssued(lic);
+      qc.invalidateQueries({ queryKey: ['licenses', 'org', orgId] });
+      toast.success('License issued');
+    },
+    onError: (e) => toast.error(apiErrorMessage(e)),
   });
 
-  const data = useMemo(() => {
-    const now = new Date();
-    return (licsQ.data ?? []).filter((l) => {
-      if (filter) {
-        const hay = `${l.jti} ${l.kid ?? ''}`.toLowerCase();
-        if (!hay.includes(filter.toLowerCase())) return false;
-      }
-      if (statusFilter === 'all') return true;
-      const revoked = !!l.revokedAt;
-      const expired = new Date(l.expiresAt) < now;
-      if (statusFilter === 'revoked') return revoked;
-      if (statusFilter === 'expired') return !revoked && expired;
-      if (statusFilter === 'active') return !revoked && !expired;
-      return true;
-    });
-  }, [licsQ.data, filter, statusFilter]);
-
   const revokeMut = useMutation({
-    mutationFn: ({ jti, reason }: { jti: string; reason?: string }) =>
-      licenses.revoke(jti, reason),
+    mutationFn: ({ jti, reason }: { jti: string; reason?: string }) => licenses.revoke(jti, reason),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['licenses', 'sub', subId] });
+      qc.invalidateQueries({ queryKey: ['licenses', 'org', orgId] });
       toast.success('License revoked');
     },
     onError: (e) => toast.error(apiErrorMessage(e)),
@@ -81,18 +151,45 @@ export function LicensesPage() {
     }
   };
 
+  const copyJwt = async () => {
+    if (!issued) return;
+    try {
+      await navigator.clipboard.writeText(issued.license);
+      toast.success('JWT copied to clipboard');
+    } catch {
+      toast.error('Copy failed — select and copy manually');
+    }
+  };
+
+  const data = useMemo(() => {
+    const now = new Date();
+    return (licsQ.data ?? []).filter((l) => {
+      if (search) {
+        const hay = `${l.subjectEmail ?? ''} ${l.jti} ${(l.permissions ?? []).join(' ')}`.toLowerCase();
+        if (!hay.includes(search.toLowerCase())) return false;
+      }
+      if (statusFilter === 'all') return true;
+      const revoked = !!l.revokedAt;
+      const expired = new Date(l.expiresAt) < now;
+      if (statusFilter === 'revoked') return revoked;
+      if (statusFilter === 'expired') return !revoked && expired;
+      if (statusFilter === 'active') return !revoked && !expired;
+      return true;
+    });
+  }, [licsQ.data, search, statusFilter]);
+
+  const canIssue = !!orgId && !!email.trim();
+
   const columns: Column<License>[] = [
     {
-      key: 'jti',
-      header: 'JTI',
+      key: 'subject',
+      header: 'Issued to',
       render: (l) => (
-        <code className="font-mono text-xs text-ink-soft">{l.jti.slice(0, 18)}…</code>
+        <div className="min-w-0">
+          <div className="truncate font-medium text-ink">{l.subjectEmail ?? '—'}</div>
+          <code className="font-mono text-[11px] text-ink-faint">{l.jti.slice(0, 16)}…</code>
+        </div>
       ),
-    },
-    {
-      key: 'kid',
-      header: 'Key',
-      render: (l) => <code className="font-mono text-xs text-ink-muted">{l.kid}</code>,
     },
     {
       key: 'status',
@@ -107,35 +204,48 @@ export function LicensesPage() {
         ),
     },
     {
+      key: 'grants',
+      header: 'Grants',
+      render: (l) => {
+        const perms = l.permissions ?? [];
+        const roles = l.roles ?? [];
+        return (
+          <div className="flex flex-wrap items-center gap-1">
+            {roles.map((r) => (
+              <Badge key={r} tone="info">
+                {r}
+              </Badge>
+            ))}
+            <span
+              className="text-xs text-ink-muted"
+              title={perms.length ? perms.join(', ') : 'No permissions'}
+            >
+              {perms.length} {perms.length === 1 ? 'permission' : 'permissions'}
+            </span>
+          </div>
+        );
+      },
+    },
+    {
       key: 'issued',
       header: 'Issued',
       render: (l) => (
-        <span className="tabular-nums text-ink-soft">
-          {new Date(l.issuedAt).toLocaleDateString()}
-        </span>
+        <span className="tabular-nums text-ink-soft">{new Date(l.issuedAt).toLocaleDateString()}</span>
       ),
     },
     {
       key: 'expires',
       header: 'Expires',
       render: (l) => (
-        <span className="tabular-nums text-ink-soft">
-          {new Date(l.expiresAt).toLocaleDateString()}
-        </span>
+        <span className="tabular-nums text-ink-soft">{new Date(l.expiresAt).toLocaleDateString()}</span>
       ),
     },
     {
-      key: 'sub',
+      key: 'actions',
       header: '',
       className: 'text-right',
       render: (l) => (
         <div className="flex justify-end gap-1">
-          <Link to={`/subscriptions/${l.subscriptionId}`}>
-            <Button variant="ghost" size="sm">
-              Subscription
-            </Button>
-          </Link>
-          {/* Revoked licenses cannot be downloaded (the backend rejects them), so hide the action. */}
           {!l.revokedAt && (
             <Button variant="ghost" size="sm" onClick={() => onDownload(l.jti)}>
               Download
@@ -162,80 +272,257 @@ export function LicensesPage() {
   ];
 
   const emptyMessage = !orgId
-    ? 'Select an organization to begin.'
-    : !subId
-      ? 'Select a subscription to view its licenses.'
-      : licsQ.isError
-        ? apiErrorMessage(licsQ.error)
-        : 'No licenses found for this subscription.';
+    ? 'Select an organization to view its licenses.'
+    : licsQ.isError
+      ? apiErrorMessage(licsQ.error)
+      : 'No licenses issued in this organization yet.';
 
   return (
     <div>
       <PageHeader
         title="Licenses"
-        description="Issued license tokens, scoped to a subscription."
+        description="Issue a signed JWT license to a user in an organization, with a hand-picked RBAC grant set."
       />
 
-      {/* Page body: choreograph the scope picker + results table in with a gentle
-          stagger. Anchored to this wrapper (kept mounted across query refetches),
-          so background license refetches do NOT replay the entrance cascade. */}
       <motion.div variants={staggerContainer} initial="hidden" animate="show">
-        {/* Scope picker — the org→subscription drill-down promoted into its own
-            glass panel so the workspace reads as a deliberate two-step flow. */}
+        {/* ---- Issue workspace ---- */}
         <motion.div variants={fadeRise}>
           <Card className="mb-6">
-            <CardBody className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <Field label="Organization" htmlFor="lic-org">
-                <Select
-                  id="lic-org"
-                  value={orgId}
-                  onChange={(e) => setOrgId(e.target.value)}
-                  disabled={orgsQ.isLoading}
+            <CardHeader
+              title="Issue a license"
+              description="Pick the organization and the user, choose exactly what to grant, then mint the token."
+            />
+            <CardBody className="space-y-5">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <Field label="Organization" htmlFor="lic-org">
+                  <Select
+                    id="lic-org"
+                    value={orgId}
+                    onChange={(e) => setOrgId(e.target.value)}
+                    disabled={orgsQ.isLoading}
+                  >
+                    <option value="">Select organization…</option>
+                    {(orgsQ.data ?? []).map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.name} ({o.slug})
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field
+                  label="Issue to (user)"
+                  htmlFor="lic-user"
+                  hint={orgId ? 'Pick a member or type a new email to invite' : 'Pick an organization first'}
                 >
-                  <option value="">Select organization…</option>
-                  {(orgsQ.data ?? []).map((o) => (
-                    <option key={o.id} value={o.id}>
-                      {o.name} ({o.slug})
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-              <Field
-                label="Subscription"
-                htmlFor="lic-sub"
-                hint={orgId ? undefined : 'Pick an organization first'}
-              >
-                <Select
-                  id="lic-sub"
-                  value={subId}
-                  onChange={(e) => setSubId(e.target.value)}
-                  disabled={!orgId || subsQ.isLoading}
-                >
-                  <option value="">Select subscription…</option>
-                  {(subsQ.data ?? []).map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.planName ?? s.planCode ?? s.planId} · {s.status}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
+                  <Input
+                    id="lic-user"
+                    type="email"
+                    list="lic-member-emails"
+                    placeholder="user@example.com"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    disabled={!orgId}
+                  />
+                  <datalist id="lic-member-emails">
+                    {(membersQ.data ?? []).map((m) => (
+                      <option key={m.userId} value={m.email}>
+                        {m.fullName ? `${m.fullName} · ${m.role}` : m.role}
+                      </option>
+                    ))}
+                  </datalist>
+                </Field>
+              </div>
+
+              {/* Grant picker */}
+              <div className="rounded-xl border border-slate-200/80 bg-white/40 p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <h4 className="text-sm font-semibold text-ink">RBAC grants</h4>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs text-ink-muted">{selectedPerms.size} selected</span>
+                    {(selectedPerms.size > 0 || selectedRoles.size > 0) && (
+                      <Button variant="ghost" size="sm" onClick={clearGrants}>
+                        Clear
+                      </Button>
+                    )}
+                  </div>
+                </div>
+
+                {grantsQ.isLoading ? (
+                  <PageLoader />
+                ) : grantsQ.isError ? (
+                  <div className="rounded-lg border border-danger-200 bg-danger-50/70 px-3 py-2 text-sm text-danger-700">
+                    {apiErrorMessage(grantsQ.error)}
+                  </div>
+                ) : (
+                  <>
+                    {/* Role presets */}
+                    <div className="mb-4">
+                      <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-ink-faint">
+                        Role presets
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {(grantsQ.data?.roles ?? []).map((r) => {
+                          const on = selectedRoles.has(r.code);
+                          return (
+                            <button
+                              key={r.code}
+                              type="button"
+                              onClick={() => toggleRole(r.code)}
+                              title={`${r.permissions.length} permissions`}
+                              className={
+                                'rounded-full border px-3 py-1 text-xs font-medium transition-colors ' +
+                                (on
+                                  ? 'border-indigo-300 bg-indigo-50 text-indigo-700'
+                                  : 'border-slate-200 bg-white/70 text-ink-muted hover:bg-white')
+                              }
+                            >
+                              {r.name ?? r.code}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Individual permissions, grouped by category */}
+                    <div className="space-y-3">
+                      {groupedPerms.map(([cat, perms]) => (
+                        <div key={cat}>
+                          <div className="mb-1.5 text-xs font-medium uppercase tracking-wide text-ink-faint">
+                            {cat}
+                          </div>
+                          <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-3">
+                            {perms.map((p) => (
+                              <label
+                                key={p.code}
+                                className="flex cursor-pointer items-start gap-2 rounded-lg px-2 py-1.5 hover:bg-white/70"
+                                title={p.description}
+                              >
+                                <input
+                                  type="checkbox"
+                                  className="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                                  checked={selectedPerms.has(p.code)}
+                                  onChange={() => togglePerm(p.code)}
+                                />
+                                <span className="min-w-0">
+                                  <code className="font-mono text-xs text-ink">{p.code}</code>
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Token options */}
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                <Field label="TTL (days)" htmlFor="lic-ttl" hint="Defaults to 365">
+                  <Input
+                    id="lic-ttl"
+                    type="number"
+                    min={1}
+                    value={ttlDays}
+                    onChange={(e) => setTtlDays(e.target.value)}
+                    placeholder="365"
+                  />
+                </Field>
+                <Field label="Audience" htmlFor="lic-aud" hint="Optional, comma-separated">
+                  <Input
+                    id="lic-aud"
+                    value={audience}
+                    onChange={(e) => setAudience(e.target.value)}
+                    placeholder="docker-app-prod"
+                  />
+                </Field>
+                <Field label="Type" htmlFor="lic-trial">
+                  <label className="flex h-[38px] items-center gap-2 text-sm text-ink-soft">
+                    <input
+                      id="lic-trial"
+                      type="checkbox"
+                      className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                      checked={trial}
+                      onChange={(e) => setTrial(e.target.checked)}
+                    />
+                    Trial license (short TTL)
+                  </label>
+                </Field>
+              </div>
+
+              <div className="flex items-center justify-end gap-3">
+                {!canIssue && (
+                  <span className="text-xs text-ink-faint">
+                    Select an organization and a user to enable issuing.
+                  </span>
+                )}
+                <PermissionGate permission="license.issue">
+                  <Button
+                    onClick={() => issueMut.mutate()}
+                    loading={issueMut.isPending}
+                    disabled={!canIssue}
+                  >
+                    Issue JWT license
+                  </Button>
+                </PermissionGate>
+              </div>
+
+              {/* Issued result */}
+              {issued && (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-4">
+                  <div className="mb-2 flex items-center justify-between">
+                    <h4 className="text-sm font-semibold text-emerald-800">License issued</h4>
+                    <button
+                      type="button"
+                      className="text-xs text-ink-muted hover:text-ink"
+                      onClick={() => setIssued(null)}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                  <dl className="mb-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-ink-soft sm:grid-cols-4">
+                    <div>
+                      <dt className="text-ink-faint">JTI</dt>
+                      <dd className="truncate font-mono">{issued.jti}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-ink-faint">Key</dt>
+                      <dd className="truncate font-mono">{issued.kid}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-ink-faint">Expires</dt>
+                      <dd className="tabular-nums">{new Date(issued.expiresAt).toLocaleDateString()}</dd>
+                    </div>
+                  </dl>
+                  <Textarea readOnly rows={3} value={issued.license} className="font-mono text-xs" />
+                  <div className="mt-2 flex gap-2">
+                    <Button size="sm" variant="outline" onClick={copyJwt}>
+                      Copy JWT
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => onDownload(issued.jti)}>
+                      Download .lic
+                    </Button>
+                  </div>
+                </div>
+              )}
             </CardBody>
           </Card>
         </motion.div>
 
+        {/* ---- Issued licenses for the selected org ---- */}
         <motion.div variants={fadeRise}>
           <DataTable
-            rows={subId ? data : []}
+            rows={orgId ? data : []}
             columns={columns}
             rowKey={(l) => l.jti}
-            loading={!!subId && licsQ.isLoading}
+            loading={!!orgId && licsQ.isLoading}
             empty={emptyMessage}
             toolbar={
               <div className="flex w-full flex-wrap items-center gap-2">
                 <Input
-                  placeholder="Search by JTI or key"
-                  value={filter}
-                  onChange={(e) => setFilter(e.target.value)}
+                  placeholder="Search by user, JTI or permission"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
                   className="max-w-sm"
                 />
                 <Select

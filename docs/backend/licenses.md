@@ -2,7 +2,7 @@
 
 > Module: `control-panel-api` · Package: `com.example.cp.licenses`
 > Source root: `control-panel-api/src/main/java/com/example/cp/licenses/`
-> Files documented: **16**
+> Files documented: **17**
 
 ## Module overview
 
@@ -14,6 +14,15 @@ Because verification is offline, the package owns the *only* two enforcement cha
 2. **Revocation** — a signed **CRL** (certificate-revocation list, itself a JWS) served from `GET /licenses/crl`, which the verifier polls to learn that an otherwise-valid, unexpired license has been killed (`LicenseRevocationService` + `CrlController`).
 
 A third runtime signal, the **heartbeat / phone-home** (`LicenseHeartbeatController` + `ActivationService`), is *advisory* seat-counting and liveness tracking — it does not gate the offline verifier, but it lets the control panel enforce seat limits and reject heartbeats from suspended subscriptions.
+
+### Two issuance flows: subscription-anchored vs. per-user (org-anchored)
+
+The package now supports **two** ways to mint a license:
+
+1. **Subscription-anchored (legacy/back-compat):** `POST /subscriptions/{id}/licenses` resolves the subscription's plan + org + entitlements into the JWT. The token's `subscription_id` is set; claims carry `plan`, `features`, `seats`, and `sub`=org id. This is what `LicenseClaimsBuilder.build` + `LicenseIssuer.issue` do.
+2. **Per-user, org-anchored (the primary admin-UI flow):** `POST /orgs/{orgId}/licenses` issues a license **to a specific user inside an org** with a **hand-picked RBAC grant set** — *no plan, no subscription*. The subject may be an existing org member (`userId`) or provisioned from an `email` (invite-by-email). The grant set is `expand(roleCodes) ∪ permissions`, validated against the RBAC catalog; `permissions`, when supplied, is authoritative (so the admin can fine-tune a role preset by un-checking permissions). The token anchors directly on `org_id`/`user_id` with `subscription_id` NULL, and the JWT's `sub` is the **user** id, with a `user` claim (`{id,email,name}`), `org_id`/`org_name`/`org_slug`, and the `permissions`/`roles` snapshot. This is `LicenseGrantService` → `LicenseClaimsBuilder.buildForUser` → `LicenseIssuer.issueForUser`.
+
+Because per-user tokens have no subscription, `TenantAccessChecker.resolveOrgForJti` resolves their owning org via the token's `org_id` directly (falling back to the subscription hop for legacy rows, which migration 20 backfills). Download, revocation, and the org-scoped list all work uniformly for both flows.
 
 The package is also a textbook of post-audit hardening. Almost every method carries a `Pn-x` audit-finding reference. The recurring themes are: **GET must be a pure read** (P1-4 — `/download` never re-mints), **concurrent writes must not resurrect a revoked/expired token** (P1-8 guarded conditional UPDATEs + `@Version`), **seat-limit TOCTOU is closed with a pessimistic row lock** (P1-9), **the public, unauthenticated CRL endpoint must not be a signing-DoS amplifier** (P2 caching), and **unbounded growth / integer overflow are clamped** (P3).
 
@@ -68,7 +77,8 @@ The files cluster into six functional groups. They are documented in the order a
 
 | Member | Purpose |
 |---|---|
-| `BuiltClaims build(Subscription sub, Integer ttlDaysOverride, List<String> audienceOverride)` | The core method. Resolves plan + org + entitlements, computes expiry, builds the claim set. |
+| `BuiltClaims build(Subscription sub, Integer ttlDaysOverride, List<String> audienceOverride)` | The subscription-anchored method. Resolves plan + org + entitlements, computes expiry, builds the claim set. |
+| `BuiltClaims buildForUser(Organization org, User user, List<String> permissions, List<String> roles, Integer ttlDaysOverride, List<String> audienceOverride)` | The **per-user** method. `sub`=user id; emits `org_id`/`org_name`/`org_slug`, a `user` claim, and the exact `permissions`/`roles` chosen — no `plan`/`subscription_id`/`features`/`seats`. TTL = positive override else `app.licenses.default-ttl-days` (365). `planCode` in the result is null. |
 | `record BuiltClaims(jti, issuedAt, expiresAt, planCode, orgName, orgSlug, audience, claims)` | The build output. Carries the `JWTClaimsSet` plus denormalized fields the issuer/artifact/file-builder need without re-querying. Helpers `issuedAtInstant()` / `expiresAtInstant()`. |
 | `List<String> defaultAudienceList()` | Returns a fresh mutable copy of the single default audience; used by callers that want to start from the default and tweak. |
 | `static final int MAX_TTL_DAYS = 36_500` | ~100-year clamp ceiling (see below). |
@@ -107,8 +117,9 @@ The files cluster into six functional groups. They are documented in the order a
 |---|---|
 | `IssuedLicense issue(UUID subscriptionId, Integer ttlDaysOverride, List<String> audienceOverride)` | Standard license (delegates to the 4-arg form with `STANDARD`). |
 | `IssuedLicense issueTrial(UUID subscriptionId, Integer ttlDaysOverride, List<String> audienceOverride)` | TRIAL license; TTL = positive override else `app.licensing.trial-ttl-days` (default 14). |
-| `IssuedLicense issue(UUID, Integer, List<String>, LicenseToken.LicenseType)` | The real implementation. |
-| `record IssuedLicense(jti, jwt, issuedAt, expiresAt, planCode, orgName, orgSlug, kid)` | The fully-formed result; the same shape that `LicenseArtifact` round-trips and `LicenseFileBuilder` consumes. |
+| `IssuedLicense issue(UUID, Integer, List<String>, LicenseToken.LicenseType)` | The real subscription-anchored implementation. |
+| `IssuedLicense issueForUser(UUID orgId, UUID userId, List<String> permissions, List<String> roles, Integer ttlDaysOverride, List<String> audienceOverride, LicenseToken.LicenseType type)` | The **per-user** implementation: requires an ACTIVE org + an existing user, builds claims via `buildForUser`, persists a token with `org_id`/`user_id`/`subject_email`/`permissions`/`roles` set and `subscription_id` NULL, plus the artifact, audit (`license.issued` with `org_id`/`user_id`) and a `LicenseIssued` outbox event carrying `org_id`/`user_id`. A TRIAL with no positive TTL falls back to `app.licensing.trial-ttl-days`. |
+| `record IssuedLicense(jti, jwt, issuedAt, expiresAt, planCode, orgName, orgSlug, kid)` | The fully-formed result; the same shape that `LicenseArtifact` round-trips and `LicenseFileBuilder` consumes. `planCode` is null for per-user licenses. |
 
 **Config.** `@Value("${app.licensing.trial-ttl-days:14}")`.
 
@@ -130,6 +141,30 @@ The files cluster into six functional groups. They are documented in the order a
 - The `licenseType` is defensively normalized: `licenseType == null ? STANDARD : licenseType`.
 - `sha256TruncatedHex` swallowing exceptions to `null` is intentional — a hashing hiccup must never abort a valid issuance; the fingerprint is auxiliary metadata.
 - Everything is one transaction: token + artifact + audit-context-driven audit row + outbox event are atomic.
+
+---
+
+#### `LicenseGrantService.java`
+
+**Responsibility.** Orchestrates the **per-user** license flow: resolve (or provision) the subject user, expand the chosen role presets + individual permissions into a validated RBAC grant set, then delegate to `LicenseIssuer.issueForUser`. Also serves the catalog of grants the admin may pick from. The whole `issue(...)` call is `@Transactional`, so user provisioning, org membership and the issued token commit (or roll back) together.
+
+**Public API.**
+
+| Member | Purpose |
+|---|---|
+| `IssuedLicense issue(UUID orgId, UUID userId, String email, List<String> roleCodes, List<String> permissions, Integer ttlDays, List<String> audience, boolean trial)` | The entry point for `POST /orgs/{orgId}/licenses`. |
+| `AssignableGrants assignableGrants()` | The grant catalog (`permissions` + `roles` with their expanded permission codes) backing the UI picker; served by `GET /licenses/assignable-grants`. |
+| `record GrantPermission(code, name, description, category)` / `record GrantRole(code, name, description, permissions)` / `record AssignableGrants(permissions, roles)` | Catalog DTOs. |
+
+**`issue` control flow:**
+1. **Resolve the subject** (`resolveSubject`): if `userId` is given, load it (404 if missing); else require a non-blank `email`, `findByEmail` it, and **provision** a password-less, unverified `ACTIVE` user if absent. Either way, `ensureMember` adds the subject to the org as `MEMBER` if not already a member (a license subject is always an org member).
+2. **Normalize roles** (`normalizeRoleCodes`): drop blanks, validate each against the role catalog (unknown → 400), dedup. This list is the `roles` snapshot.
+3. **Resolve permissions** (`resolvePermissions`): if an explicit `permissions` set is supplied it is **authoritative** (validate each code against the catalog, dedup) and roles are a snapshot only — so an admin who un-checks a permission from a role preset keeps it removed. If no explicit permissions are given, expand the role codes via `role_permissions`. Every code validated → unknown permission/role is a 400, never silently dropped.
+4. `issuer.issueForUser(orgId, subject.id, resolvedPermissions, roleSnapshot, ttlDays, audience, trial ? TRIAL : STANDARD)`.
+
+**Gotchas:**
+- The authoritative-permissions rule is the crux of the "role preset, then fine-tune" UX. Sending both `roleCodes` and a fine-tuned `permissions` list does **not** re-expand the roles on top (which would re-add an un-checked permission).
+- Provisioned users have no password and cannot log in — they exist purely as a license subject. Email is matched case-insensitively (the `users.email` column is CITEXT).
 
 ---
 
@@ -180,7 +215,12 @@ The files cluster into six functional groups. They are documented in the order a
 | `id` UUID `@Id` | Primary key (UUIDv7 from `Ids.newId()`). |
 | `version` long `@Version` | **Optimistic lock.** Prevents a heartbeat last-seen flush from rewriting a concurrently-committed revocation/expiry back to ACTIVE (lost update, **P1-8**). |
 | `jti` (unique, len 64) | The license id used everywhere in the API path. |
-| `subscription_id` UUID | Owning subscription (and transitively, org). |
+| `subscription_id` UUID **(nullable)** | Owning subscription for subscription-anchored tokens. **NULL for per-user tokens** (migration 20 dropped the NOT NULL). |
+| `org_id` UUID | Direct org anchor (the tenant anchor for per-user tokens; backfilled from the subscription for legacy rows by migration 20). |
+| `user_id` UUID | The subject user a per-user license was issued to (the JWT `sub`). NULL for legacy subscription tokens. `ON DELETE SET NULL` so the token/CRL/audit history survives a user delete. |
+| `subject_email` (len 320) | Durable display snapshot of the subject's email (survives a later user delete). |
+| `permissions` TEXT (`@Builder.Default "[]"`) | JSON-array snapshot of the permission codes baked into the JWT (for the org-scoped Licenses list / audit). |
+| `roles` TEXT (`@Builder.Default "[]"`) | JSON-array snapshot of the role codes chosen as presets when issuing. |
 | `kid` (len 64) | The signing-key id used — important for key rotation / which JWKS entry verifies it. |
 | `issued_at`, `expires_at` | Mirror the JWT `iat`/`exp`. |
 | `revoked_at`, `revoke_reason` | Set on revocation. |
@@ -274,7 +314,10 @@ Trivial: `JpaRepository<LicenseArtifact, String>` (PK is the `jti` string) with 
 
 | Endpoint | Auth (`@PreAuthorize`) | Behavior |
 |---|---|---|
-| `POST /subscriptions/{subId}/licenses` | `@tenantAccess.canIssueLicenseForSubscription(#subId)` | Issues a standard or (if `body.trial==true`) trial license. Returns `201` with `{jti, kid, issuedAt, expiresAt, license (raw JWT), downloadUrl}`. |
+| `POST /subscriptions/{subId}/licenses` | `@tenantAccess.canIssueLicenseForSubscription(#subId)` | Subscription-anchored issuance. Issues a standard or (if `body.trial==true`) trial license. Returns `201` with `{jti, kid, issuedAt, expiresAt, license (raw JWT), downloadUrl}`. |
+| `POST /orgs/{orgId}/licenses` | `@tenantAccess.canIssueLicenseForOrg(#orgId)` | **Per-user issuance** (`LicenseGrantService`). Body `IssueForUserRequest(userId, email, roleCodes, permissions, ttlDays, audience, trial, notes)` — identify the subject by `userId` or `email` (invite-by-email). Same `201` response shape. |
+| `GET /orgs/{orgId}/licenses` | `@tenantAccess.canAccessOrg(#orgId)` | Lists every license anchored to the org (the per-user Licenses workspace), optional `status` filter, paged. |
+| `GET /licenses/assignable-grants` | `isAuthenticated()` | The grant catalog (roles with expanded permissions + the permission catalog) for the issue-form picker. |
 | `GET /licenses/{jti}/download` | `@tenantAccess.canReadLicenseByJti(#jti)` | **Pure read** of the stored artifact → `.lic` JSON attachment. |
 | `POST /licenses/{jti}/revoke` | `@tenantAccess.canRevokeLicenseByJti(#jti) or hasAuthority('SUPER_ADMIN')` | Revokes; `204`. |
 | `GET /licenses` | `@tenantAccess.canReadSubscription(#subscriptionId)` | Lists licenses for a **required** `subscriptionId` (paged). |
@@ -459,7 +502,7 @@ The `@Scheduled` method `sweep()` calls `self.expirePastDue()` / `self.warnExpir
 
 **Responsibility.** The read-model record returned by `GET /licenses` and `GET /licenses/{jti}`. Flattens a `LicenseToken` into a JSON-friendly shape and optionally carries the live active-seat count.
 
-**Shape:** `record LicenseDto(id, jti, subscriptionId, kid, issuedAt, expiresAt, revokedAt, revokeReason, fingerprint, lastSeenAt, lastSeenIp, status, licenseType, activeSeats)`.
+**Shape:** `record LicenseDto(id, jti, subscriptionId, orgId, userId, subjectEmail, permissions, roles, kid, issuedAt, expiresAt, revokedAt, revokeReason, fingerprint, lastSeenAt, lastSeenIp, status, licenseType, activeSeats)`. The `orgId`/`userId`/`subjectEmail`/`permissions`/`roles` fields surface the per-user anchor + RBAC snapshot; `permissions`/`roles` are parsed from the token's JSON-array snapshot columns (a tolerant local mapper degrades a malformed/legacy value to an empty list).
 
 **Factories:**
 - `static LicenseDto from(LicenseToken t)` — `activeSeats = null` (list view; computing per-row seat counts would be N+1).
@@ -481,6 +524,7 @@ The `@Scheduled` method `sweep()` calls `self.expirePastDue()` / `self.warnExpir
 | CRL signing DoS (P2) | `CrlController` cache + `revocationStateKey` | Cache signed JWS; re-sign only on revoked-set change or TTL. |
 | Atomic expiry/warn (P2) | `LicenseLifecycleScheduler` + `@Lazy self` | Proxy-routed `@Transactional`; set-based UPDATE; durable warn dedup. |
 | Unbounded growth / overflow (P3) | `clampTtlDays`, `listActiveRevocations`, `PageRequestParams` cap | Clamp TTL; prune expired revocations from CRL; cap page size. |
-| Tenant isolation | every controller method | `@PreAuthorize` → `@tenantAccess` (`TenantAccessChecker`) resolving jti/sub → org. |
+| Per-user issuance + RBAC grants | `LicenseGrantService`, `LicenseClaimsBuilder.buildForUser`, `LicenseIssuer.issueForUser` | Issue to an org user with `expand(roleCodes) ∪ permissions` (explicit `permissions` authoritative), validated against the RBAC catalog; token anchors on `org_id`/`user_id`, JWT `sub`=user. |
+| Tenant isolation | every controller method | `@PreAuthorize` → `@tenantAccess` (`TenantAccessChecker`) resolving jti → `org_id` (per-user) or jti/sub → subscription → org (legacy). |
 | Real client IP | `LicenseHeartbeatController` | `TrustedProxyResolver.resolveClientIp`. |
 | Auditing & events | `LicenseIssuer`, `LicenseRevocationService`, `ActivationService`, scheduler | `AuditContext` + transactional `OutboxPublisher`. |
