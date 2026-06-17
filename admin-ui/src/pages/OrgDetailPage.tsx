@@ -9,7 +9,6 @@ import {
   apiErrorMessage,
   audit as auditApi,
   orgs,
-  subscriptions as subsApi,
 } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import {
@@ -22,14 +21,13 @@ import {
   Field,
   Input,
   Select,
-  StatusBadge,
   Tabs,
 } from '@/components/ui';
 import { DataTable, type Column } from '@/components/DataTable';
 import { PermissionGate } from '@/components/PermissionGate';
 import { useToast } from '@/lib/toast';
 import { fadeRise, hoverLift, staggerContainer } from '@/lib/motion';
-import type { AuditEntry, OrgMember, Subscription } from '@/lib/types';
+import type { AuditEntry, OrgMember } from '@/lib/types';
 
 const ROLES = ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'] as const;
 const inviteSchema = z.object({
@@ -40,7 +38,7 @@ type InviteValues = z.infer<typeof inviteSchema>;
 
 export function OrgDetailPage() {
   const { orgId = '' } = useParams<{ orgId: string }>();
-  const [tab, setTab] = useState<'members' | 'subscriptions' | 'sso' | 'apiKeys' | 'audit'>('members');
+  const [tab, setTab] = useState<'members' | 'sso' | 'apiKeys' | 'audit'>('members');
 
   const orgQ = useQuery({ queryKey: ['org', orgId], queryFn: () => orgs.get(orgId), enabled: !!orgId });
 
@@ -71,11 +69,6 @@ export function OrgDetailPage() {
                   <Link to={`/orgs/${orgId}/api-keys`}>
                     <Button variant="outline">API keys</Button>
                   </Link>
-                  <PermissionGate permission="subscription.create">
-                    <Link to={`/subscriptions/new?orgId=${orgId}`}>
-                      <Button>New subscription</Button>
-                    </Link>
-                  </PermissionGate>
                 </>
               ) : null
             }
@@ -88,7 +81,6 @@ export function OrgDetailPage() {
             onChange={(id) => setTab(id as typeof tab)}
             tabs={[
               { id: 'members', label: 'Members' },
-              { id: 'subscriptions', label: 'Subscriptions' },
               { id: 'sso', label: 'SSO' },
               { id: 'apiKeys', label: 'API keys' },
               { id: 'audit', label: 'Audit' },
@@ -99,7 +91,6 @@ export function OrgDetailPage() {
 
       <motion.div key={tab} variants={fadeRise} initial="hidden" animate="show" className="mt-6">
         {tab === 'members' && <MembersTab orgId={orgId} />}
-        {tab === 'subscriptions' && <SubscriptionsTab orgId={orgId} />}
         {tab === 'sso' && (
           <motion.div {...hoverLift}>
             <Card>
@@ -277,66 +268,6 @@ function MembersTab({ orgId }: { orgId: string }) {
         </form>
       </Dialog>
     </>
-  );
-}
-
-function SubscriptionsTab({ orgId }: { orgId: string }) {
-  const subsQ = useQuery({
-    queryKey: ['org', orgId, 'subscriptions'],
-    queryFn: () => subsApi.listForOrg(orgId),
-    enabled: !!orgId,
-  });
-
-  const columns: Column<Subscription>[] = [
-    {
-      key: 'plan',
-      header: 'Plan',
-      render: (s) => (
-        <span className="font-medium text-ink">{s.planName ?? s.planCode ?? s.planId}</span>
-      ),
-    },
-    { key: 'status', header: 'Status', render: (s) => <StatusBadge status={s.status} /> },
-    { key: 'seats', header: 'Seats', render: (s) => s.seats },
-    {
-      key: 'starts',
-      header: 'Starts',
-      render: (s) => new Date(s.startsAt).toLocaleDateString(),
-    },
-    { key: 'ends', header: 'Ends', render: (s) => new Date(s.endsAt).toLocaleDateString() },
-    {
-      key: 'actions',
-      header: '',
-      className: 'text-right',
-      render: (s) => (
-        <Link to={`/subscriptions/${s.id}`}>
-          <Button variant="ghost" size="sm">
-            Open
-          </Button>
-        </Link>
-      ),
-    },
-  ];
-
-  return (
-    <DataTable
-      rows={subsQ.data}
-      columns={columns}
-      rowKey={(s) => s.id}
-      loading={subsQ.isLoading}
-      empty={subsQ.isError ? apiErrorMessage(subsQ.error) : 'No subscriptions for this org.'}
-      toolbar={
-        <div className="flex w-full items-center justify-between">
-          <span className="text-sm tabular-nums text-ink-muted">
-            {subsQ.data?.length ?? 0} subscriptions
-          </span>
-          <PermissionGate permission="subscription.create">
-            <Link to={`/subscriptions/new?orgId=${orgId}`}>
-              <Button size="sm">New subscription</Button>
-            </Link>
-          </PermissionGate>
-        </div>
-      }
-    />
   );
 }
 

@@ -16,7 +16,6 @@ interface NavItem {
 const NAV: NavItem[] = [
   { to: '/', label: 'Dashboard', icon: 'D' },
   { to: '/orgs', label: 'Organizations', icon: 'O', permission: 'org.read' },
-  { to: '/plans', label: 'Plans', icon: 'P', permission: 'plan.read' },
   { to: '/licenses', label: 'Licenses', icon: 'L', permission: 'license.read' },
   { to: '/keys', label: 'Signing keys', icon: 'K', permission: 'key.read' },
   { to: '/audit', label: 'Audit log', icon: 'A', permission: 'audit.read' },

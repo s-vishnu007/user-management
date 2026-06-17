@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { licenses, orgs, plans, subscriptions } from '@/lib/api';
+import { licenses, orgs } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, CardBody, CardHeader } from '@/components/ui';
 import { useAuth } from '@/lib/auth';
@@ -106,12 +106,6 @@ const ICON = {
       <path strokeLinecap="round" strokeLinejoin="round" d="M3 21V5a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v16M13 9h6a1 1 0 0 1 1 1v11M6 8h2m-2 4h2m-2 4h2m9-4h1m-1 4h1" />
     </svg>
   ),
-  plans: (
-    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={1.8}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M4 7h16M4 12h16M4 17h10" />
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-    </svg>
-  ),
   thisMonth: (
     <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={1.8}>
       <rect x="3" y="4" width="18" height="17" rx="2" />
@@ -135,20 +129,10 @@ const QUICK_ACTIONS: QuickAction[] = [
     icon: ICON.orgs,
   },
   {
-    to: '/plans',
-    label: 'Manage plans',
-    helper: 'Entitlements & pricing',
-    icon: ICON.plans,
-  },
-  {
-    to: '/subscriptions/new',
-    label: 'Provision new subscription',
-    helper: 'Issue access to a customer',
-    icon: (
-      <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={1.8}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14m7-7H5" />
-      </svg>
-    ),
+    to: '/licenses',
+    label: 'Issue a license',
+    helper: 'Per-user JWT with RBAC grants',
+    icon: ICON.active,
   },
   {
     to: '/keys',
@@ -165,23 +149,17 @@ const QUICK_ACTIONS: QuickAction[] = [
 export function DashboardPage() {
   const { user } = useAuth();
   const orgsQ = useQuery({ queryKey: ['orgs'], queryFn: orgs.list });
-  const plansQ = useQuery({ queryKey: ['plans'], queryFn: plans.list });
 
-  // The /licenses endpoint is now subscription-scoped (the tenant-leak fix), so there is no
-  // unscoped global list. Aggregate license activity client-side by walking each org's
-  // subscriptions and fetching that subscription's licenses. (Flagged: a backend aggregate
-  // endpoint would be cleaner — see crossCuttingNotes.)
+  // Licenses are org-anchored (per-user model), so aggregate activity by fanning out one org-scoped
+  // list per org and flattening. This counts the per-user licenses the old subscription-walking
+  // aggregation used to miss. (Flagged: a backend cross-org aggregate endpoint would be cleaner.)
   const licensesQ = useQuery<License[]>({
     queryKey: ['dashboard', 'licenses'],
     enabled: !!orgsQ.data,
     queryFn: async () => {
       const orgList = orgsQ.data ?? [];
-      const subArrays = await Promise.all(
-        orgList.map((o) => subscriptions.listForOrg(o.id).catch(() => [])),
-      );
-      const subs = subArrays.flat();
       const licArrays = await Promise.all(
-        subs.map((s) => licenses.listForSubscription(s.id).catch(() => [])),
+        orgList.map((o) => licenses.listForOrg(o.id).catch(() => [])),
       );
       return licArrays.flat();
     },
@@ -219,7 +197,7 @@ export function DashboardPage() {
     <div>
       <PageHeader
         title={`Welcome${user?.fullName ? `, ${user.fullName}` : ''}`}
-        description="A snapshot of customers, subscriptions, and license activity."
+        description="A snapshot of organizations and license activity."
         breadcrumb={
           <span className="inline-flex items-center gap-1.5">
             <span
@@ -235,7 +213,7 @@ export function DashboardPage() {
         variants={staggerContainer}
         initial="hidden"
         animate="show"
-        className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4"
+        className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
       >
         <Stat
           label="Organizations"
@@ -243,13 +221,6 @@ export function DashboardPage() {
           loading={orgsQ.isLoading}
           icon={ICON.orgs}
           accent="bg-indigo-300/40"
-        />
-        <Stat
-          label="Plans"
-          value={plansQ.data?.length ?? 0}
-          loading={plansQ.isLoading}
-          icon={ICON.plans}
-          accent="bg-violet-300/40"
         />
         <Stat
           label="Licenses this month"
@@ -293,7 +264,7 @@ export function DashboardPage() {
                   </span>
                   <div className="text-sm font-medium text-ink">No license data yet.</div>
                   <p className="max-w-xs text-xs text-ink-muted">
-                    Issued licenses will appear here once subscriptions start producing them.
+                    Issued licenses will appear here once you start issuing them.
                   </p>
                 </div>
               ) : (

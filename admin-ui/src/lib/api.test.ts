@@ -6,9 +6,7 @@ import {
   licenses,
   newIdempotencyKey,
   normalizeApiKey,
-  plans,
   sso,
-  subscriptions,
 } from './api';
 import type { ApiKeyDto, SsoProviderDto } from './types';
 
@@ -18,33 +16,6 @@ function mockResponse(data: unknown) {
 
 afterEach(() => {
   vi.restoreAllMocks();
-});
-
-describe('plans client — P0-2 field-name contract', () => {
-  it('setPermissions sends { permissionCodes }, never { permissions }', async () => {
-    const post = vi.spyOn(http, 'post').mockResolvedValue(mockResponse({}));
-    await plans.setPermissions('plan-1', ['license.read', 'license.issue']);
-    expect(post).toHaveBeenCalledTimes(1);
-    const [url, body] = post.mock.calls[0];
-    expect(url).toBe('/api/v1/plans/plan-1/permissions');
-    expect(body).toEqual({ permissionCodes: ['license.read', 'license.issue'] });
-    expect(body).not.toHaveProperty('permissions');
-  });
-
-  it('setFeatures sends features as a JSON object (Map), not an array', async () => {
-    const post = vi.spyOn(http, 'post').mockResolvedValue(mockResponse({}));
-    await plans.setFeatures('plan-1', { max_users: 50, beta: true });
-    const [, body] = post.mock.calls[0];
-    expect(body).toEqual({ features: { max_users: 50, beta: true } });
-    expect(Array.isArray((body as { features: unknown }).features)).toBe(false);
-  });
-
-  it('create sends an Idempotency-Key header', async () => {
-    const post = vi.spyOn(http, 'post').mockResolvedValue(mockResponse({}));
-    await plans.create({ code: 'pro', name: 'Pro', permissions: [], features: {} });
-    const config = post.mock.calls[0][2] as { headers: Record<string, string> };
-    expect(config.headers['Idempotency-Key']).toBeTruthy();
-  });
 });
 
 describe('sso client — list-of-providers contract', () => {
@@ -143,21 +114,6 @@ describe('apiKeys client — scopes parsing & plaintext surfacing', () => {
   });
 });
 
-describe('licenses client — subscription-scoped contract', () => {
-  it('listForSubscription always passes subscriptionId', async () => {
-    const get = vi.spyOn(http, 'get').mockResolvedValue(mockResponse([]));
-    await licenses.listForSubscription('sub-9');
-    expect(get.mock.calls[0][0]).toContain('subscriptionId=sub-9');
-  });
-
-  it('list requires a subscriptionId param and forwards it', async () => {
-    const get = vi.spyOn(http, 'get').mockResolvedValue(mockResponse([]));
-    await licenses.list({ subscriptionId: 'sub-1', status: 'ACTIVE' });
-    expect(get.mock.calls[0][0]).toContain('subscriptionId=sub-1');
-    expect(get.mock.calls[0][0]).toContain('status=ACTIVE');
-  });
-});
-
 describe('licenses client — per-user org flow', () => {
   it('issueForOrg posts to /orgs/{orgId}/licenses with the grant payload + Idempotency-Key', async () => {
     const post = vi.spyOn(http, 'post').mockResolvedValue(mockResponse({ jti: 'lic_1' }));
@@ -192,19 +148,6 @@ describe('licenses client — per-user org flow', () => {
     const grants = await licenses.assignableGrants();
     expect(get.mock.calls[0][0]).toBe('/api/v1/licenses/assignable-grants');
     expect(grants).toEqual({ permissions: [], roles: [] });
-  });
-});
-
-describe('subscriptions client — idempotent create', () => {
-  it('create sends an Idempotency-Key header and honors an explicit key', async () => {
-    const post = vi.spyOn(http, 'post').mockResolvedValue(mockResponse({}));
-    await subscriptions.create(
-      'o1',
-      { planId: 'p1', startsAt: 'a', endsAt: 'b', seats: 5 },
-      'fixed-key-123',
-    );
-    const config = post.mock.calls[0][2] as { headers: Record<string, string> };
-    expect(config.headers['Idempotency-Key']).toBe('fixed-key-123');
   });
 });
 

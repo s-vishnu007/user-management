@@ -13,7 +13,6 @@ import type {
   Organization,
   Paged,
   Permission,
-  Plan,
   RegisterResponse,
   RoleDef,
   SigningKey,
@@ -22,9 +21,6 @@ import type {
   SsoProviderDto,
   SsoProviderView,
   SsoType,
-  Subscription,
-  SubscriptionOverride,
-  UsageReport,
   User,
 } from './types';
 
@@ -210,125 +206,10 @@ export const rbac = {
   },
 };
 
-// ---------- Plans ----------
-// The backend create endpoint takes `permissions` (string[]) and `features` (a JSON object
-// keyed by feature key) inline; the permissions/features endpoints take `permissionCodes` and
-// `features` respectively. `features` is a Map<String,Object>, NOT an array.
-export const plans = {
-  list: async (): Promise<Plan[]> => {
-    const { data } = await http.get<Plan[] | Paged<Plan>>('/api/v1/plans');
-    return Array.isArray(data) ? data : data.items;
-  },
-  get: async (id: string): Promise<Plan> => {
-    const { data } = await http.get<Plan>(`/api/v1/plans/${id}`);
-    return data;
-  },
-  create: async (
-    payload: {
-      code: string;
-      name: string;
-      description?: string;
-      tier?: string;
-      defaultTtlDays?: number;
-      active?: boolean;
-      permissions?: string[];
-      features?: Record<string, unknown>;
-    },
-    idempotencyKey?: string,
-  ): Promise<Plan> => {
-    const { data } = await http.post<Plan>('/api/v1/plans', payload, idempotent(idempotencyKey));
-    return data;
-  },
-  update: async (
-    id: string,
-    patch: {
-      name?: string;
-      description?: string;
-      tier?: string;
-      defaultTtlDays?: number;
-      active?: boolean;
-    },
-  ): Promise<Plan> => {
-    const { data } = await http.patch<Plan>(`/api/v1/plans/${id}`, patch);
-    return data;
-  },
-  // Backend DTO field is `permissionCodes` — sending `permissions` binds null and DELETES every
-  // entitlement permission on the plan (finding P0-2).
-  setPermissions: async (id: string, permissionCodes: string[]): Promise<Plan> => {
-    const { data } = await http.post<Plan>(`/api/v1/plans/${id}/permissions`, { permissionCodes });
-    return data;
-  },
-  // Backend DTO field is `features`, typed as a JSON object (Map<String,Object>).
-  setFeatures: async (id: string, features: Record<string, unknown>): Promise<Plan> => {
-    const { data } = await http.post<Plan>(`/api/v1/plans/${id}/features`, { features });
-    return data;
-  },
-};
-
-// ---------- Subscriptions ----------
-export const subscriptions = {
-  listForOrg: async (orgId: string): Promise<Subscription[]> => {
-    const { data } = await http.get<Subscription[] | Paged<Subscription>>(
-      `/api/v1/orgs/${orgId}/subscriptions`,
-    );
-    return Array.isArray(data) ? data : data.items;
-  },
-  create: async (
-    orgId: string,
-    payload: {
-      planId: string;
-      startsAt: string;
-      endsAt: string;
-      seats: number;
-      notes?: string;
-      overrides?: SubscriptionOverride[];
-    },
-    idempotencyKey?: string,
-  ): Promise<Subscription> => {
-    const { data } = await http.post<Subscription>(
-      `/api/v1/orgs/${orgId}/subscriptions`,
-      payload,
-      idempotent(idempotencyKey),
-    );
-    return data;
-  },
-  get: async (id: string): Promise<Subscription> => {
-    const { data } = await http.get<Subscription>(`/api/v1/subscriptions/${id}`);
-    return data;
-  },
-  suspend: async (id: string, reason?: string) => {
-    await http.post(`/api/v1/subscriptions/${id}/suspend`, { reason });
-  },
-  cancel: async (id: string, reason?: string) => {
-    await http.post(`/api/v1/subscriptions/${id}/cancel`, { reason });
-  },
-  reactivate: async (id: string) => {
-    await http.post(`/api/v1/subscriptions/${id}/reactivate`);
-  },
-  // The backend endpoint adds ONE override per call: POST /subscriptions/{id}/overrides with a
-  // single {type, key, value} body (not an array).
-  addOverride: async (id: string, override: SubscriptionOverride) => {
-    await http.post(`/api/v1/subscriptions/${id}/overrides`, override);
-  },
-  removeOverride: async (id: string, overrideId: string) => {
-    await http.delete(`/api/v1/subscriptions/${id}/overrides/${overrideId}`);
-  },
-};
-
 // ---------- Licenses ----------
+// Licenses are issued PER-USER and anchored on an organization (the per-user RBAC model). The old
+// subscription-scoped issue/list helpers were removed with the Plans/Subscriptions UI.
 export const licenses = {
-  issue: async (
-    subId: string,
-    payload?: { ttlDays?: number; audience?: string[]; notes?: string; trial?: boolean },
-    idempotencyKey?: string,
-  ): Promise<IssuedLicense> => {
-    const { data } = await http.post<IssuedLicense>(
-      `/api/v1/subscriptions/${subId}/licenses`,
-      payload ?? {},
-      idempotent(idempotencyKey),
-    );
-    return data;
-  },
   /**
    * Per-user issuance (the primary Licenses workspace flow): mints a JWT for a user inside an org
    * carrying a hand-picked RBAC grant set — no plan/subscription. Identify the subject by `userId`
@@ -371,17 +252,6 @@ export const licenses = {
     const { data } = await http.get<AssignableGrants>('/api/v1/licenses/assignable-grants');
     return data;
   },
-  // The /licenses endpoint REQUIRES subscriptionId (the tenant-leak fix). There is no unscoped
-  // global enumeration; callers must pass a subscriptionId (see licenses.list / LicensesPage).
-  listForSubscription: async (subId: string, status?: string): Promise<License[]> => {
-    const q = new URLSearchParams({ subscriptionId: subId });
-    if (status) q.set('status', status);
-    const { data } = await http.get<License[] | Paged<License>>(`/api/v1/licenses?${q.toString()}`);
-    return Array.isArray(data) ? data : data.items;
-  },
-  /** Alias retained for clarity; subscriptionId is mandatory. */
-  list: async (params: { subscriptionId: string; status?: string }): Promise<License[]> =>
-    licenses.listForSubscription(params.subscriptionId, params.status),
   revoke: async (jti: string, reason?: string) => {
     await http.post(`/api/v1/licenses/${jti}/revoke`, { reason });
   },
@@ -408,22 +278,6 @@ export const keys = {
       '/api/v1/admin/keys/rotate',
       {},
       idempotent(idempotencyKey),
-    );
-    return data;
-  },
-};
-
-// ---------- Usage ----------
-export const usage = {
-  forSubscription: async (
-    subId: string,
-    params: { from?: string; to?: string } = {},
-  ): Promise<UsageReport> => {
-    const q = new URLSearchParams();
-    if (params.from) q.set('from', params.from);
-    if (params.to) q.set('to', params.to);
-    const { data } = await http.get<UsageReport>(
-      `/api/v1/subscriptions/${subId}/usage?${q.toString()}`,
     );
     return data;
   },

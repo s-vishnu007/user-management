@@ -121,58 +121,12 @@ export interface RoleDef {
   permissions: string[];
 }
 
-export interface PlanFeature {
-  key: string;
-  value: string | number | boolean;
-}
-
-/**
- * Mirror of the backend {@code PlanDto}. The backend exposes {@code active} (boolean) and
- * {@code tier} (not a {@code status} string), and {@code features} is a JSON object
- * ({@code Map<String,Object>}) keyed by feature key — NOT an array.
- */
-export interface Plan {
-  id: string;
-  code: string;
-  name: string;
-  description?: string;
-  tier?: string;
-  active?: boolean;
-  permissions: string[];
-  features: Record<string, unknown>;
-  defaultTtlDays?: number;
-  createdAt?: string;
-}
-
-export type SubscriptionStatus = 'ACTIVE' | 'SUSPENDED' | 'EXPIRED' | 'CANCELLED' | 'PENDING';
-
-export interface SubscriptionOverride {
-  id?: string;
-  type: 'PERMISSION_ADD' | 'PERMISSION_REMOVE' | 'FEATURE_SET';
-  key: string;
-  value?: string | number | boolean;
-}
-
-export interface Subscription {
-  id: string;
-  orgId: string;
-  orgName?: string;
-  planId: string;
-  planCode?: string;
-  planName?: string;
-  status: SubscriptionStatus;
-  startsAt: string;
-  endsAt: string;
-  seats: number;
-  overrides?: SubscriptionOverride[];
-  createdAt?: string;
-}
-
-/** Mirror of the backend {@code LicenseDto} returned by the licenses list/get endpoints. */
+/** Mirror of the backend {@code LicenseDto} returned by the licenses list endpoints. */
 export interface License {
   id?: string;
   jti: string;
-  subscriptionId: string;
+  // NULL for the per-user (org-anchored) model; set only on legacy subscription-anchored tokens.
+  subscriptionId?: string | null;
   kid: string;
   issuedAt: string;
   expiresAt: string;
@@ -218,7 +172,7 @@ export interface AssignableGrants {
   roles: GrantRole[];
 }
 
-/** Raw response of the {@code POST /subscriptions/{subId}/licenses} issue endpoint. */
+/** Raw response of the {@code POST /orgs/{orgId}/licenses} per-user issue endpoint. */
 export interface IssuedLicense {
   jti: string;
   kid: string;
@@ -236,36 +190,6 @@ export interface SigningKey {
   activatedAt?: string;
   retiredAt?: string | null;
   publicKey?: string;
-}
-
-export interface UsageEvent {
-  id?: string;
-  subscriptionId: string;
-  jti?: string;
-  featureKey: string;
-  quantity: number;
-  occurredAt: string;
-  metadata?: Record<string, unknown>;
-}
-
-export interface UsageSeries {
-  featureKey: string;
-  points: { ts: string; quantity: number }[];
-}
-
-export interface UsageQuota {
-  featureKey: string;
-  limit: number | null;
-  used: number;
-  remaining: number | null;
-}
-
-export interface UsageReport {
-  subscriptionId: string;
-  windowStart: string;
-  windowEnd: string;
-  series: UsageSeries[];
-  quotas: UsageQuota[];
 }
 
 export interface AuditEntry {
