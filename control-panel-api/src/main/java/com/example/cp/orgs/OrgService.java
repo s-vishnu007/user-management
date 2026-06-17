@@ -180,8 +180,23 @@ public class OrgService {
             throw ApiException.forbidden("Only an OWNER can grant OWNER");
         }
         Organization org = get(orgId);
-        User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> ApiException.notFound("User with that email not found"));
+        // Invite-by-email: if no account exists for this email yet, provision a password-less, ACTIVE
+        // user and add them (consistent with per-user license issuance). The invitee can claim the
+        // account later via signup / password-reset; until then the row just carries the membership.
+        boolean provisioned = false;
+        User user = userRepository.findByEmail(email).orElse(null);
+        if (user == null) {
+            user = userRepository.save(User.builder()
+                    .id(Ids.newId())
+                    .email(email)
+                    .status(User.Status.ACTIVE)
+                    .superAdmin(false)
+                    .emailVerified(false)
+                    .tokenVersion(0L)
+                    .createdAt(OffsetDateTime.now())
+                    .build());
+            provisioned = true;
+        }
         if (memberRepository.findByOrgIdAndUserId(orgId, user.getId()).isPresent()) {
             throw ApiException.conflict("User is already a member");
         }
@@ -195,6 +210,9 @@ public class OrgService {
         AuditContext.set("org.member.added");
         AuditContext.setTarget("org_member", orgId + ":" + user.getId());
         AuditContext.putPayload("role", role.name());
+        if (provisioned) {
+            AuditContext.putPayload("provisioned_user", user.getId().toString());
+        }
         return saved;
     }
 

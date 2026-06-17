@@ -248,7 +248,13 @@ function MembersTab({ orgId }: { orgId: string }) {
           onSubmit={form.handleSubmit((v) => inviteMut.mutate(v))}
           className="space-y-4"
         >
-          <Field label="Email" htmlFor="m-email" required error={form.formState.errors.email?.message}>
+          <Field
+            label="Email"
+            htmlFor="m-email"
+            required
+            hint="No account yet? They'll be invited (a password-less account is created)."
+            error={form.formState.errors.email?.message}
+          >
             <Input
               id="m-email"
               type="email"
