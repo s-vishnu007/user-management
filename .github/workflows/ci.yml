@@ -30,7 +30,7 @@ jobs:
           java-version: '21'
 
       - name: Cache local Maven repository
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.m2/repository
           # Re-key the cache whenever any pom.xml changes so dependency updates are picked up.
@@ -68,7 +68,7 @@ jobs:
           java-version: '21'
 
       - name: Cache local Maven repository
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
@@ -97,7 +97,7 @@ jobs:
           java-version: '21'
 
       - name: Cache local Maven repository
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.m2/repository
           key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
@@ -108,7 +108,7 @@ jobs:
       # An NVD API key (repo secret NVD_API_KEY) dramatically speeds up and de-flakes the feed
       # update; the scan still runs without it, just slower.
       - name: Cache OWASP NVD data
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.m2/repository/org/owasp/dependency-check-data
           key: ${{ runner.os }}-owasp-nvd
