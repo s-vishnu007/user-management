@@ -53,7 +53,7 @@
         <json-smart.version>2.5.2</json-smart.version>
         <bouncycastle.version>1.78.1</bouncycastle.version>
         <uuid-creator.version>6.0.0</uuid-creator.version>
-        <aspectjweaver.version>1.9.22.1</aspectjweaver.version>
+        <aspectjweaver.version>1.9.25.1</aspectjweaver.version>
         <tink.version>1.13.0</tink.version>
         <jacoco-maven-plugin.version>0.8.14</jacoco-maven-plugin.version>
         <!-- Override Spring Boot 3.3.x's managed byte-buddy (1.14.x) so Mockito can instrument
